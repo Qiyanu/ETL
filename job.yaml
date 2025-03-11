@@ -1,0 +1,25 @@
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: customer-data-job
+spec:
+  template:
+    spec:
+      timeoutSeconds: 86400
+      serviceAccountName: 358087425973-compute@developer.gserviceaccount.com
+      containers:
+      - image: ${IMAGE_URI}
+        resources:
+          limits:
+            cpu: 4.0
+            memory: 16Gi
+        env:
+        - name: CONFIG_FILE
+          value: "config.yaml"
+        - name: CLOUD_RUN_ENFORCE_TIMEOUTS
+          value: "true"
+    metadata:
+      annotations:
+        run.googleapis.com/startup-cpu-boost: "true"
+  parallelism: 1
+  taskCount: 1

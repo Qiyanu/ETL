@@ -1,17 +1,157 @@
+import os
 import time
 import threading
 import random
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import psutil
 
 from src.logging_utils import logger
 
+class ContainerAwareResourceMonitor:
+    """Monitor resources with awareness of containerized environments."""
+    
+    def __init__(self):
+        """Initialize the resource monitor with container detection."""
+        self.is_container = self._detect_container()
+        logger.info(f"Resource monitor initialized: {'container' if self.is_container else 'standard'} environment detected")
+        
+    def _detect_container(self) -> bool:
+        """Detect if running in a container environment."""
+        # Check for Docker
+        if os.path.exists('/.dockerenv'):
+            return True
+        
+        # Check for Kubernetes
+        if os.path.exists('/var/run/secrets/kubernetes.io'):
+            return True
+        
+        # Check cgroups for container evidence
+        try:
+            with open('/proc/1/cgroup', 'r') as f:
+                content = f.read()
+                if 'docker' in content or 'kubepods' in content:
+                    return True
+        except (IOError, FileNotFoundError):
+            pass
+            
+        return False
+    
+    def get_container_limits(self) -> Dict[str, Optional[float]]:
+        """Get resource limits from container metadata if available."""
+        cpu_limit = None
+        memory_limit = None
+        
+        # Try to read memory limit from cgroups
+        try:
+            with open('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'r') as f:
+                memory_limit = int(f.read().strip())
+                # Convert from bytes to MB
+                memory_limit = memory_limit / (1024 * 1024)
+        except (IOError, FileNotFoundError):
+            pass
+            
+        # Try to read CPU quota and period from cgroups
+        try:
+            with open('/sys/fs/cgroup/cpu/cpu.cfs_quota_us', 'r') as f:
+                cpu_quota = int(f.read().strip())
+            with open('/sys/fs/cgroup/cpu/cpu.cfs_period_us', 'r') as f:
+                cpu_period = int(f.read().strip())
+                
+            if cpu_quota > 0 and cpu_period > 0:
+                cpu_limit = cpu_quota / cpu_period
+        except (IOError, FileNotFoundError):
+            pass
+            
+        return {
+            'cpu_limit': cpu_limit,
+            'memory_limit_mb': memory_limit
+        }
+    
+    def get_memory_usage(self) -> float:
+        """Get memory usage percentage, container-aware if possible."""
+        if self.is_container:
+            # Try container-specific approach first
+            try:
+                with open('/sys/fs/cgroup/memory/memory.usage_in_bytes', 'r') as f:
+                    usage = int(f.read().strip())
+                with open('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'r') as f:
+                    limit = int(f.read().strip())
+                    
+                # Avoid division by zero or unrealistic limits (sometimes reported as very large numbers)
+                if limit and limit < 2**60:  # Sanity check for the limit
+                    return usage / limit
+            except (IOError, FileNotFoundError, ValueError):
+                pass
+        
+        # Fall back to psutil
+        return psutil.virtual_memory().percent / 100.0
+    
+    def get_cpu_usage(self) -> float:
+        """Get CPU usage percentage, container-aware if possible."""
+        if self.is_container:
+            # For CPU in containers, we'll need multiple samples
+            try:
+                # Read CPU stats at two points in time
+                with open('/sys/fs/cgroup/cpu/cpuacct.usage', 'r') as f:
+                    usage1 = int(f.read().strip())
+                time.sleep(0.1)  # Brief delay
+                with open('/sys/fs/cgroup/cpu/cpuacct.usage', 'r') as f:
+                    usage2 = int(f.read().strip())
+                
+                # Calculate usage over the period
+                cpu_delta = usage2 - usage1
+                time_delta = 0.1 * 1e9  # Convert to nanoseconds
+                
+                # Get number of CPUs
+                try:
+                    with open('/sys/fs/cgroup/cpu/cpu.cfs_quota_us', 'r') as f:
+                        quota = int(f.read().strip())
+                    with open('/sys/fs/cgroup/cpu/cpu.cfs_period_us', 'r') as f:
+                        period = int(f.read().strip())
+                    num_cpus = quota / period if quota > 0 else os.cpu_count() or 1
+                except (IOError, FileNotFoundError):
+                    num_cpus = os.cpu_count() or 1
+                
+                # Calculate percentage
+                return (cpu_delta / time_delta) / num_cpus
+            except (IOError, FileNotFoundError, ValueError):
+                pass
+        
+        # Fall back to psutil
+        return psutil.cpu_percent(interval=None) / 100.0
+    
+    def get_system_metrics(self) -> Dict[str, Any]:
+        """Get comprehensive system metrics, container-aware if possible."""
+        cpu_usage = self.get_cpu_usage()
+        memory_usage = self.get_memory_usage()
+        
+        # Get container limits if available
+        limits = {}
+        if self.is_container:
+            limits = self.get_container_limits()
+        
+        # Memory information
+        memory = psutil.virtual_memory()
+        
+        # Combine standard and container-specific metrics
+        return {
+            'cpu_percent': cpu_usage,
+            'memory_percent': memory_usage,
+            'memory_available_gb': memory.available / (1024**3),
+            'memory_available_mb': memory.available / (1024**2),
+            'is_container': self.is_container,
+            'container_cpu_limit': limits.get('cpu_limit'),
+            'container_memory_limit_mb': limits.get('memory_limit_mb'),
+            'timestamp': datetime.now().isoformat(),
+        }
+
 class AdaptiveWorkerScaler:
     """
     Dynamically adjusts worker count based on system resource availability.
     Optimized for resource-intensive workloads with a memory-first scaling strategy.
+    Container-aware for cloud environments.
     """
     
     def __init__(self, config: Dict[str, Any]):
@@ -60,41 +200,17 @@ class AdaptiveWorkerScaler:
         self.sample_count = config.get("METRIC_SAMPLE_COUNT", 3)
         self.sample_interval = config.get("METRIC_SAMPLE_INTERVAL_SECONDS", 1)
         
+        # Initialize container-aware resource monitor
+        self.resource_monitor = ContainerAwareResourceMonitor()
+        
+        # Log initialization
+        container_status = "container-aware" if self.resource_monitor.is_container else "standard"
         logger.info(
-            f"Adaptive worker scaling initialized. "
+            f"Adaptive worker scaling initialized ({container_status}). "
             f"Initial workers: {self.initial_workers}, "
             f"Min: {self.min_workers}, Max: {self.max_workers}, "
             f"Memory per worker: {self.memory_per_worker_mb}MB"
         )
-    
-    def _get_system_metrics(self) -> Dict[str, float]:
-        """
-        Collect system metrics with multiple samples for accuracy.
-        
-        Returns:
-            dict: System resource utilization metrics
-        """
-        # Take multiple samples
-        cpu_samples = []
-        memory_samples = []
-        
-        for _ in range(self.sample_count):
-            cpu_samples.append(psutil.cpu_percent(interval=None) / 100.0)
-            memory = psutil.virtual_memory()
-            memory_samples.append(memory.percent / 100.0)
-            time.sleep(self.sample_interval)
-        
-        # Memory information
-        memory = psutil.virtual_memory()
-        
-        # Compile metrics
-        return {
-            'cpu_percent': sum(cpu_samples) / len(cpu_samples),
-            'memory_percent': sum(memory_samples) / len(memory_samples),
-            'memory_available_gb': memory.available / (1024**3),
-            'memory_available_mb': memory.available / (1024**2),
-            'timestamp': datetime.now().isoformat(),
-        }
     
     def get_worker_count(self) -> int:
         """
@@ -105,21 +221,40 @@ class AdaptiveWorkerScaler:
         """
         # Get current system metrics
         metrics = self._get_system_metrics()
-        cpu_usage = metrics['cpu_percent']
-        memory_usage = metrics['memory_percent']
-        memory_available_mb = metrics['memory_available_mb']
-        
-        # Check cooldown period
-        current_time = time.time()
-        if current_time - self.last_scaling_time < self.scaling_cooldown:
-            return self.current_workers
         
         with self.lock:
+            # Check cooldown period first - FIXED: moved inside lock
+            current_time = time.time()
+            if current_time - self.last_scaling_time < self.scaling_cooldown:
+                return self.current_workers
+                
+            # Extract metrics safely after lock acquisition
+            cpu_usage = metrics['cpu_percent']
+            memory_usage = metrics['memory_percent']
+            memory_available_mb = metrics['memory_available_mb']
+            
             previous_workers = self.current_workers
             
             # Calculate max workers based on available memory
             max_workers_by_memory = int(memory_available_mb / self.memory_per_worker_mb)
             max_workers_by_memory = max(self.min_workers, min(max_workers_by_memory, self.max_workers))
+            
+            # Use container CPU limit if available
+            container_cpu_limit = metrics.get('container_cpu_limit')
+            if container_cpu_limit and container_cpu_limit > 0:
+                # Adjust max workers based on CPU limit
+                cpu_based_max_workers = max(1, int(container_cpu_limit))
+                self.max_workers = min(self.max_workers, cpu_based_max_workers)
+                logger.debug(f"Adjusting max workers to {self.max_workers} based on container CPU limit")
+            
+            # Use container memory limit if available
+            container_memory_limit_mb = metrics.get('container_memory_limit_mb')
+            if container_memory_limit_mb and container_memory_limit_mb > 0:
+                # Reserve 20% for system overhead
+                usable_memory = container_memory_limit_mb * 0.8
+                memory_based_max_workers = max(1, int(usable_memory / self.memory_per_worker_mb))
+                self.max_workers = min(self.max_workers, memory_based_max_workers)
+                logger.debug(f"Adjusting max workers to {self.max_workers} based on container memory limit")
             
             # Emergency scale down for critical memory pressure
             if memory_usage > self.memory_limit_threshold and self.current_workers > self.min_workers:
@@ -237,6 +372,32 @@ class AdaptiveWorkerScaler:
         
         return self.current_workers
     
+    def _get_system_metrics(self) -> Dict[str, float]:
+        """
+        Collect system metrics with multiple samples for accuracy.
+        Container-aware if running in a containerized environment.
+        
+        Returns:
+            dict: System resource utilization metrics
+        """
+        # Take multiple samples
+        metrics_samples = []
+        
+        for _ in range(self.sample_count):
+            metrics_samples.append(self.resource_monitor.get_system_metrics())
+            time.sleep(self.sample_interval)
+        
+        # Average the metrics
+        cpu_samples = [m['cpu_percent'] for m in metrics_samples]
+        memory_samples = [m['memory_percent'] for m in metrics_samples]
+        
+        # Combine with the most recent complete metrics
+        final_metrics = metrics_samples[-1].copy()
+        final_metrics['cpu_percent'] = sum(cpu_samples) / len(cpu_samples)
+        final_metrics['memory_percent'] = sum(memory_samples) / len(memory_samples)
+        
+        return final_metrics
+    
     def _record_adjustment(
         self, 
         previous_workers: int, 
@@ -273,6 +434,7 @@ class AdaptiveWorkerScaler:
         # Log memory allocation details
         total_memory_gb = psutil.virtual_memory().total / (1024**3)
         logger.info(
+            f"Worker count adjusted: {previous_workers} → {new_workers} ({reason}). "
             f"Memory allocation: "
             f"Total: {total_memory_gb:.2f}GB, "
             f"Per worker: {self.memory_per_worker_mb/1024:.2f}GB, "
@@ -292,6 +454,7 @@ class AdaptiveWorkerScaler:
 class AdaptiveSemaphore:
     """
     Thread-safe semaphore that can dynamically adjust its counter.
+    Handles currently-in-use permits robustly.
     """
     
     def __init__(self, initial_value: int):
@@ -301,11 +464,18 @@ class AdaptiveSemaphore:
         Args:
             initial_value (int): Initial number of permits
         """
-        self.value = initial_value
+        if initial_value < 0:
+            raise ValueError("Semaphore value cannot be negative")
+            
+        self.current_value = initial_value  # Current configured value
+        self.available_permits = initial_value  # Actually available permits
         self.lock = threading.Lock()
         self._real_semaphore = threading.Semaphore(initial_value)
+        
+        # Track pending decreases when permits are in use
+        self.pending_decrease = 0
     
-    def acquire(self, blocking: bool = True, timeout: float = None) -> bool:
+    def acquire(self, blocking: bool = True, timeout: Optional[float] = None) -> bool:
         """
         Acquire a permit from the semaphore.
         
@@ -316,55 +486,113 @@ class AdaptiveSemaphore:
         Returns:
             bool: Whether a permit was acquired
         """
-        return self._real_semaphore.acquire(blocking, timeout)
+        acquired = False
+        
+        # First acquire our tracking lock to update internal state
+        with self.lock:
+            # Check if we're allowed to acquire based on current settings
+            if self.available_permits <= 0:
+                return False
+                
+            # Reserve the permit in our tracking
+            self.available_permits -= 1
+        
+        # Now actually acquire the permit from the real semaphore
+        try:
+            if timeout is not None:
+                acquired = self._real_semaphore.acquire(blocking=blocking, timeout=timeout)
+            else:
+                acquired = self._real_semaphore.acquire(blocking=blocking)
+            
+            if not acquired:
+                # Failed to acquire, release our tracking reservation
+                with self.lock:
+                    self.available_permits += 1
+        except:
+            # On any error, release our tracking reservation
+            with self.lock:
+                self.available_permits += 1
+            raise
+            
+        return acquired
     
     def release(self) -> None:
-        """Release a permit back to the semaphore."""
-        return self._real_semaphore.release()
+        """
+        Release a permit back to the semaphore.
+        Also processes any pending decreases.
+        """
+        with self.lock:
+            # Release the real semaphore
+            self._real_semaphore.release()
+            self.available_permits += 1
+            
+            # Process any pending decrease
+            if self.pending_decrease > 0:
+                # We can now successfully reduce a permit
+                self._real_semaphore.acquire(blocking=False)
+                self.available_permits -= 1
+                self.pending_decrease -= 1
+                logger.debug(f"Processed pending permit decrease, {self.pending_decrease} remaining")
     
     def adjust_value(self, new_value: int) -> None:
         """
         Dynamically adjust the number of available permits.
+        Handles adjustments gracefully even when permits are in use.
         
         Args:
             new_value (int): New number of permits
         """
+        if new_value < 0:
+            raise ValueError("Semaphore value cannot be negative")
+            
         with self.lock:
-            current_value = self.value
+            current_value = self.current_value
             
             if new_value > current_value:
                 # Increase permits
                 for _ in range(new_value - current_value):
-                    self.release()
+                    self._real_semaphore.release()
+                    self.available_permits += 1
+                
                 logger.info(f"Increased worker semaphore: {current_value} → {new_value}")
+                
             elif new_value < current_value:
-                # Decrease permits
+                # Decrease permits - try to acquire what we can immediately
+                decrease_amount = current_value - new_value
                 acquired_count = 0
-                for _ in range(current_value - new_value):
-                    # Non-blocking acquire to avoid deadlock
-                    if self._real_semaphore.acquire(blocking=False):
-                        acquired_count += 1
+                pending_count = 0
+                
+                for _ in range(decrease_amount):
+                    if self.available_permits > 0:
+                        # We have unused permits that can be removed immediately
+                        if self._real_semaphore.acquire(blocking=False):
+                            self.available_permits -= 1
+                            acquired_count += 1
+                        else:
+                            # This is unexpected - our tracking doesn't match reality
+                            # Log the inconsistency but continue
+                            logger.warning("Semaphore state inconsistency detected")
+                    else:
+                        # Record as pending - will be removed when permits are released
+                        self.pending_decrease += 1
+                        pending_count += 1
                 
                 if acquired_count > 0:
-                    logger.info(
-                        f"Decreased worker semaphore by {acquired_count} "
-                        f"(target: {current_value} → {new_value})"
-                    )
-                
-                # Update tracking value
-                self.value = current_value - acquired_count
-                return
+                    logger.info(f"Decreased worker semaphore by {acquired_count} immediately")
+                    
+                if pending_count > 0:
+                    logger.info(f"Scheduled {pending_count} permits for future decrease")
             
             # Update tracking value
-            self.value = new_value
+            self.current_value = new_value
     
     @property
-    def current_value(self) -> int:
+    def active_permits(self) -> int:
         """
-        Get the current number of available permits.
+        Get the number of currently acquired permits.
         
         Returns:
-            int: Current number of permits
+            int: Number of permits in use
         """
         with self.lock:
-            return self.value
+            return self.current_value - self.available_permits

@@ -1,24 +1,27 @@
 # BigQuery Integration
-google-cloud-bigquery>=3.11.0
-google-cloud-bigquery-storage>=2.19.0
+google-cloud-bigquery==3.11.4
+google-cloud-bigquery-storage==2.22.0
 
 # Cloud Platform Integration
-google-cloud-storage>=2.7.0
-google-cloud-monitoring>=2.11.0
-google-cloud-logging>=3.5.0
+google-cloud-storage==2.9.0
+google-cloud-monitoring==2.15.1
+google-cloud-logging==3.8.0
 
 # Configuration Management
-PyYAML>=6.0
+PyYAML==6.0.1
 
 # Date and Time Processing
-python-dateutil>=2.8.2
+python-dateutil==2.8.2
 
 # Reliability and Performance
-backoff>=2.2.1
-pyarrow>=12.0.0 
-psutil>=5.9.0
+backoff==2.2.1
+pyarrow==13.0.0 
+psutil==5.9.5
+
+# HTTP/API Requests
+requests==2.31.0
 
 # Development and Debugging
-pylint>=2.17.0
-black>=23.3.0
-isort>=5.12.0
+pylint==3.0.1
+black==23.9.1
+isort==5.12.0

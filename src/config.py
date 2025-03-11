@@ -15,7 +15,7 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """
     errors = []
     
-    # Required configuration keys
+    # Required configuration keys with expected types
     required_keys = {
         "DEST_TABLE": str,
         "SOURCE_LINE_TABLE": str,
@@ -25,7 +25,15 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
         "SOURCE_STORE_TABLE": str,
         "MAX_WORKERS": int,
         "QUERY_TIMEOUT": int,
-        "ALLOWED_COUNTRIES": list
+        "ALLOWED_COUNTRIES": list,
+        "COUNTRY_MAPPING": dict,
+        "EXCLUDED_CHAIN_TYPES": list,
+        "ENABLE_RETRIES": bool,
+        "CIRCUIT_BREAKER_THRESHOLD": int,
+        "CIRCUIT_BREAKER_TIMEOUT": int,
+        "MAX_RETRY_ATTEMPTS": int,
+        "JOB_MAX_RUNTIME": int,
+        "JOB_TIMEOUT_SAFETY_MARGIN": int
     }
     
     # Validate presence and types of required keys
@@ -39,6 +47,11 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
     if "ALLOWED_COUNTRIES" in config and isinstance(config["ALLOWED_COUNTRIES"], list):
         if len(config["ALLOWED_COUNTRIES"]) == 0:
             errors.append("ALLOWED_COUNTRIES list cannot be empty")
+        
+        # Ensure all country codes are supported by query templates
+        for country in config["ALLOWED_COUNTRIES"]:
+            if country not in ["ITA", "ESP"]:
+                errors.append(f"Unsupported country code: {country}. Only ITA and ESP are supported.")
             
     # Validate MAX_WORKERS is reasonable
     if "MAX_WORKERS" in config and isinstance(config["MAX_WORKERS"], int):
@@ -85,6 +98,40 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
             errors.append("CIRCUIT_BREAKER_TIMEOUT must be an integer")
         elif config["CIRCUIT_BREAKER_TIMEOUT"] < 5:
             errors.append("CIRCUIT_BREAKER_TIMEOUT must be at least 5 seconds")
+            
+    # Validate country mapping
+    if ("COUNTRY_MAPPING" in config and 
+        isinstance(config["COUNTRY_MAPPING"], dict) and 
+        "ALLOWED_COUNTRIES" in config and 
+        isinstance(config["ALLOWED_COUNTRIES"], list)):
+        for country in config["ALLOWED_COUNTRIES"]:
+            if country not in config["COUNTRY_MAPPING"]:
+                errors.append(f"Missing country mapping for {country}")
+                
+    # Validate date settings
+    if "START_MONTH" in config and config["START_MONTH"]:
+        try:
+            from datetime import datetime
+            datetime.strptime(config["START_MONTH"], '%Y-%m-%d')
+        except ValueError:
+            errors.append("START_MONTH must be in YYYY-MM-DD format")
+            
+    if "END_MONTH" in config and config["END_MONTH"]:
+        try:
+            from datetime import datetime
+            datetime.strptime(config["END_MONTH"], '%Y-%m-%d')
+        except ValueError:
+            errors.append("END_MONTH must be in YYYY-MM-DD format")
+            
+    if "LAST_N_MONTHS" in config and config["LAST_N_MONTHS"]:
+        try:
+            last_n = int(config["LAST_N_MONTHS"])
+            if last_n < 1:
+                errors.append("LAST_N_MONTHS must be at least 1")
+            elif last_n > 36:
+                errors.append("LAST_N_MONTHS is suspiciously large (>36), please verify")
+        except (ValueError, TypeError):
+            errors.append("LAST_N_MONTHS must be an integer")
     
     # Return validation result
     return len(errors) == 0, errors
@@ -153,6 +200,8 @@ def load_config(config_file=None) -> Dict[str, Any]:
         "TARGET_CPU_USAGE": 0.7,  # 70%
         "TARGET_MEMORY_USAGE": 0.6,  # 60%
         "MEMORY_PER_WORKER_MB": 512,  # 512MB per worker
+        "MEMORY_SAFETY_FACTOR": 1.2,  # 20% safety margin for memory allocation
+        "SERVICE_NAME": "customer-data-etl",
     }
     
     # Try to load from YAML file if provided
@@ -204,6 +253,12 @@ def load_config(config_file=None) -> Dict[str, Any]:
                 config["MEMORY_PER_WORKER_MB"] = loaded_config['processing']['memory_per_worker_mb']
             if 'target_memory_usage' in loaded_config['processing']:
                 config["TARGET_MEMORY_USAGE"] = loaded_config['processing']['target_memory_usage']
+            if 'connection_pool_shutdown_timeout' in loaded_config['processing']:
+                config["CONNECTION_POOL_SHUTDOWN_TIMEOUT"] = loaded_config['processing']['connection_pool_shutdown_timeout']
+            if 'memory_scale_up_threshold' in loaded_config['processing']:
+                config["MEMORY_SCALE_UP_THRESHOLD"] = loaded_config['processing']['memory_scale_up_threshold']
+            if 'memory_scale_down_threshold' in loaded_config['processing']:
+                config["MEMORY_SCALE_DOWN_THRESHOLD"] = loaded_config['processing']['memory_scale_down_threshold']
         
         # Handle BigQuery section
         if 'bigquery' in loaded_config:
@@ -217,6 +272,8 @@ def load_config(config_file=None) -> Dict[str, Any]:
                 config["PRIORITY"] = loaded_config['bigquery']['priority']
             if 'maximum_bytes_billed' in loaded_config['bigquery']:
                 config["MAXIMUM_BYTES_BILLED"] = loaded_config['bigquery']['maximum_bytes_billed']
+            if 'query_batch_size' in loaded_config['bigquery']:
+                config["QUERY_BATCH_SIZE"] = loaded_config['bigquery']['query_batch_size']
         
         # Handle filters section
         if 'filters' in loaded_config:
@@ -239,6 +296,30 @@ def load_config(config_file=None) -> Dict[str, Any]:
                 config["CIRCUIT_BREAKER_THRESHOLD"] = loaded_config['resilience']['circuit_breaker_threshold']
             if 'circuit_breaker_timeout' in loaded_config['resilience']:
                 config["CIRCUIT_BREAKER_TIMEOUT"] = loaded_config['resilience']['circuit_breaker_timeout']
+            if 'retry_initial_delay_ms' in loaded_config['resilience']:
+                config["RETRY_INITIAL_DELAY_MS"] = loaded_config['resilience']['retry_initial_delay_ms']
+            if 'retry_max_delay_ms' in loaded_config['resilience']:
+                config["RETRY_MAX_DELAY_MS"] = loaded_config['resilience']['retry_max_delay_ms']
+            if 'retry_multiplier' in loaded_config['resilience']:
+                config["RETRY_MULTIPLIER"] = loaded_config['resilience']['retry_multiplier']
+        
+        # Handle temp tables section
+        if 'temp_tables' in loaded_config:
+            if 'expiration_hours' in loaded_config['temp_tables']:
+                config["TEMP_TABLE_EXPIRATION_HOURS"] = loaded_config['temp_tables']['expiration_hours']
+            if 'add_descriptions' in loaded_config['temp_tables']:
+                config["TEMP_TABLE_ADD_DESCRIPTIONS"] = loaded_config['temp_tables']['add_descriptions']
+            if 'dedicated_dataset' in loaded_config['temp_tables']:
+                config["TEMP_DEDICATED_DATASET"] = loaded_config['temp_tables']['dedicated_dataset']
+                
+        # Handle logging section
+        if 'logging' in loaded_config:
+            if 'level' in loaded_config['logging']:
+                config["LOG_LEVEL"] = loaded_config['logging']['level']
+            if 'enable_structured_logging' in loaded_config['logging']:
+                config["ENABLE_STRUCTURED_LOGGING"] = loaded_config['logging']['enable_structured_logging']
+            if 'include_query_stats' in loaded_config['logging']:
+                config["INCLUDE_QUERY_STATS"] = loaded_config['logging']['include_query_stats']
         
         # Handle job section
         if 'job' in loaded_config:
@@ -254,6 +335,11 @@ def load_config(config_file=None) -> Dict[str, Any]:
                 config["LAST_N_MONTHS"] = loaded_config['job']['last_n_months']
             if 'parallel' in loaded_config['job']:
                 config["PARALLEL"] = loaded_config['job']['parallel']
+            if 'memory_limit_gb' in loaded_config['job']:
+                # Convert to MB for consistency
+                config["MEMORY_LIMIT_MB"] = loaded_config['job']['memory_limit_gb'] * 1024
+            if 'cpu_limit' in loaded_config['job']:
+                config["CPU_LIMIT"] = loaded_config['job']['cpu_limit']
     
     # Override with environment variables
     for key in config.copy():

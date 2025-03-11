@@ -3,6 +3,7 @@ import sys
 import os
 import traceback
 import json
+import threading
 from typing import Optional, Union, Dict, Any
 
 class ETLLogger:
@@ -11,7 +12,7 @@ class ETLLogger:
     
     Provides:
     - Structured JSON logging for cloud environments
-    - Correlation ID tracking
+    - Correlation ID tracking with thread safety
     - Service name tracking
     - Flexible log level configuration
     """
@@ -34,17 +35,23 @@ class ETLLogger:
         # Set service name
         self.service = service_name or os.environ.get("K_SERVICE", "local")
         
+        # Add thread-safe context tracking
+        self._thread_local = threading.local()
+        self._thread_local.correlation_id = "not-set"
+        
         # Set log level
         log_level = log_level or os.environ.get("LOG_LEVEL", "INFO")
         self.logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
         
-        # Create a custom filter for adding context
-        self.correlation_id = "not-set"
+        # Create a proper reference to the logger instance for the filter
+        logger_instance = self
         
         class ContextFilter(logging.Filter):
             def filter(self, record):
-                record.correlation_id = getattr(self, 'correlation_id', 'not-set')
-                record.service = getattr(self, 'service', 'local')
+                # Get correlation ID from the thread-local storage
+                thread_local_id = getattr(logger_instance._thread_local, 'correlation_id', 'not-set')
+                record.correlation_id = thread_local_id
+                record.service = logger_instance.service
                 return True
         
         # Create handler for stdout (cloud-friendly)
@@ -109,14 +116,21 @@ class ETLLogger:
             # Log string error message
             self.error(str(error))
     
+    @property
+    def correlation_id(self) -> str:
+        """Get the current correlation ID for this thread."""
+        return getattr(self._thread_local, 'correlation_id', 'not-set')
+    
+    @correlation_id.setter
     def set_correlation_id(self, correlation_id: str) -> None:
         """
         Set a correlation ID for tracking related log entries.
+        Thread-safe implementation that uses thread-local storage.
         
         Args:
             correlation_id (str): Unique identifier for a specific process/request
         """
-        self.correlation_id = correlation_id
+        self._thread_local.correlation_id = correlation_id
     
     def set_service_name(self, service_name: str) -> None:
         """
@@ -127,6 +141,6 @@ class ETLLogger:
         """
         self.service = service_name
 
-# Create a global logger instance 
+# Create a global logger instance with better thread safety
 # This can be imported and used across the application
 logger = ETLLogger()

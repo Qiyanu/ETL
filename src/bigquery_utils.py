@@ -170,6 +170,8 @@ class BigQueryConnectionPool:
             client = self._create_client()
             self.available_clients.append(client)
             self.created_connections += 1
+            
+        logger.info(f"BigQuery connection pool initialized with {preload_count} preloaded connections")
     
     def _create_client(self) -> bigquery.Client:
         """
@@ -196,20 +198,26 @@ class BigQueryConnectionPool:
         # Acquire semaphore to control maximum concurrent connections
         self.semaphore.acquire()
         
-        with self.lock:
-            self.checkout_count += 1
-            
-            if self.available_clients:
-                # Reuse an existing client from the pool
-                client = self.available_clients.pop()
+        try:
+            with self.lock:
+                self.checkout_count += 1
+                
+                if self.available_clients:
+                    # Reuse an existing client from the pool
+                    client = self.available_clients.pop()
+                    self.in_use_clients.add(client)
+                    return client
+                
+                # No available clients, create a new one
+                client = self._create_client()
                 self.in_use_clients.add(client)
+                self.created_connections += 1
                 return client
-            
-            # No available clients, create a new one
-            client = self._create_client()
-            self.in_use_clients.add(client)
-            self.created_connections += 1
-            return client
+        except Exception as e:
+            # Release semaphore on error
+            self.semaphore.release()
+            logger.error(f"Error getting client from pool: {e}")
+            raise
     
     def release_client(self, client: bigquery.Client) -> None:
         """
@@ -218,32 +226,33 @@ class BigQueryConnectionPool:
         Args:
             client (bigquery.Client): Client to return to the pool
         """
-        with self.lock:
-            if client in self.in_use_clients:
-                self.in_use_clients.remove(client)
-                
-                if self.shutdown_requested:
-                    # During shutdown, close immediately
-                    try:
-                        client.close()
-                    except Exception as e:
-                        logger.warning(f"Error closing client during shutdown: {e}")
+        try:
+            with self.lock:
+                if client in self.in_use_clients:
+                    self.in_use_clients.remove(client)
                     
-                    # Signal shutdown completion if no active connections
-                    if not self.in_use_clients:
-                        self.shutdown_event.set()
-                elif len(self.available_clients) < self.pool_size:
-                    # Return to pool during normal operation
-                    self.available_clients.append(client)
-                else:
-                    # Close excess connections
-                    try:
-                        client.close()
-                    except Exception as e:
-                        logger.warning(f"Error closing excess client: {e}")
-        
-        # Release the semaphore
-        self.semaphore.release()
+                    if self.shutdown_requested:
+                        # During shutdown, close immediately
+                        try:
+                            client.close()
+                        except Exception as e:
+                            logger.warning(f"Error closing client during shutdown: {e}")
+                        
+                        # Signal shutdown completion if no active connections
+                        if not self.in_use_clients:
+                            self.shutdown_event.set()
+                    elif len(self.available_clients) < self.pool_size:
+                        # Return to pool during normal operation
+                        self.available_clients.append(client)
+                    else:
+                        # Close excess connections
+                        try:
+                            client.close()
+                        except Exception as e:
+                            logger.warning(f"Error closing excess client: {e}")
+        finally:
+            # Always release the semaphore
+            self.semaphore.release()
     
     def close_all(self, timeout: int = 30) -> None:
         """
@@ -254,8 +263,8 @@ class BigQueryConnectionPool:
         """
         logger.info("Initiating connection pool shutdown")
         
+        # Mark pool as shutting down and close available clients without blocking
         with self.lock:
-            # Mark pool as shutting down
             self.shutdown_requested = True
             
             # Close available clients
@@ -274,7 +283,7 @@ class BigQueryConnectionPool:
             if in_use_count == 0:
                 self.shutdown_event.set()
         
-        # Wait for shutdown or timeout
+        # Wait for shutdown or timeout - OUTSIDE the lock to avoid deadlock
         if not self.shutdown_event.wait(timeout=timeout):
             # Forcefully close remaining connections
             with self.lock:
@@ -502,6 +511,8 @@ class BigQueryOperations:
             gcp_exceptions.TooManyRequests,
             gcp_exceptions.ServiceUnavailable,
         )
+        
+        logger.info(f"BigQuery operations initialized with connection pool size {config.get('MAX_CONNECTIONS', 10)}")
     
     def _validate_config(self, config: Dict[str, Any]) -> None:
         """
@@ -516,12 +527,27 @@ class BigQueryOperations:
         required_keys = [
             "DEST_TABLE", 
             "QUERY_TIMEOUT", 
-            "MAX_WORKERS"
+            "MAX_WORKERS",
+            "SOURCE_LINE_TABLE",
+            "SOURCE_HEADER_TABLE",
+            "SOURCE_CARD_TABLE",
+            "SOURCE_SITE_TABLE",
+            "SOURCE_STORE_TABLE",
+            "ALLOWED_COUNTRIES"
         ]
         
         missing_keys = [key for key in required_keys if key not in config]
         if missing_keys:
             raise ValueError(f"Missing required configuration keys: {', '.join(missing_keys)}")
+        
+        # Validate table name formats
+        table_keys = ["DEST_TABLE", "SOURCE_LINE_TABLE", "SOURCE_HEADER_TABLE", 
+                      "SOURCE_CARD_TABLE", "SOURCE_SITE_TABLE", "SOURCE_STORE_TABLE"]
+        
+        for key in table_keys:
+            table_id = config.get(key, "")
+            if not table_id or table_id.count(".") != 2:
+                raise ValueError(f"{key} should have format 'project.dataset.table', got: {table_id}")
     
     def _is_retryable_exception(self, exception: Exception) -> bool:
         """
@@ -601,12 +627,14 @@ class BigQueryOperations:
             raise Exception("Circuit breaker is open, refusing operation")
         
         # Get client from connection pool
-        client = self.connection_pool.get_client()
+        client = None
         try:
+            client = self.connection_pool.get_client()
             yield client
         finally:
-            # Always return the client to the pool
-            self.connection_pool.release_client(client)
+            # Always return the client to the pool if we got one
+            if client is not None:
+                self.connection_pool.release_client(client)
     
     def execute_query(self, query: str, params: Optional[List[Any]] = None, 
                      timeout: Optional[float] = None, return_job: bool = False,
@@ -661,6 +689,12 @@ class BigQueryOperations:
         # Set SQL dialect
         job_config.use_legacy_sql = self.config.get("USE_LEGACY_SQL", False)
         
+        # Label queries for monitoring
+        job_config.labels = {
+            "service": self.config.get("SERVICE_NAME", "etl-job"),
+            "job_type": "data_processing"
+        }
+        
         # Start tracking execution time
         metrics.start_timer("query_execution")
         query_start_time = time.time()
@@ -703,8 +737,13 @@ class BigQueryOperations:
                         metrics.increment_counter("bigquery_transient_errors")
                         
                         if retry_count <= max_retries and self.config.get("ENABLE_RETRIES", True):
+                            # Exponential backoff with jitter for retries
                             delay = min(max_delay, base_delay * (2 ** (retry_count - 1)))
-                            logger.warning(f"Transient error (attempt {retry_count}/{max_retries}): {e}. Retrying in {delay}s")
+                            # Add jitter (±20%)
+                            jitter = random.uniform(0.8, 1.2)
+                            delay = delay * jitter
+                            
+                            logger.warning(f"Transient error (attempt {retry_count}/{max_retries}): {e}. Retrying in {delay:.1f}s")
                             time.sleep(delay)
                         else:
                             metrics.stop_timer("query_execution")

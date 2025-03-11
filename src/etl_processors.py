@@ -90,12 +90,24 @@ def create_temp_table_for_month(bq_ops, the_month, temp_table_id, country, reque
         if not query_generator:
             raise ValueError(f"Unsupported country: {country}")
         
-        create_temp_table_query = query_generator(bq_ops, temp_table_id)
+        # Get the query and parameters
+        result = query_generator(bq_ops, temp_table_id)
         
-        # Set up query parameters
-        params = [
-            bigquery.ScalarQueryParameter("theMonth", "DATE", the_month),
-        ]
+        # Handle both old and new return formats for compatibility
+        if isinstance(result, tuple) and len(result) == 2:
+            create_temp_table_query, params = result
+        else:
+            # Old format - just the query string
+            create_temp_table_query = result
+            # Set up default query parameters
+            params = [
+                bigquery.ScalarQueryParameter("theMonth", "DATE", the_month),
+            ]
+        
+        # Update the theMonth parameter with the actual value
+        for param in params:
+            if param.name == "theMonth" and param.value is None:
+                param._value = the_month  # Set the actual value
         
         # Execute query to create temporary table
         bq_ops.execute_query(create_temp_table_query, params)

@@ -14,15 +14,19 @@ class Metrics:
     - Generate summary statistics
     """
     
-    def __init__(self):
+    def __init__(self, max_history_per_metric=1000):
         """
         Initialize the metrics collector.
+        
+        Args:
+            max_history_per_metric (int): Maximum number of values to store per metric
         
         Uses a thread lock to ensure thread-safe operations.
         """
         self.metrics: Dict[str, Union[List[float], int]] = {}
         self.start_times: Dict[str, Dict[int, float]] = {}  # Track timers per thread
         self.lock = threading.Lock()
+        self.max_history_per_metric = max_history_per_metric
     
     def start_timer(self, metric_name: str) -> None:
         """
@@ -71,7 +75,7 @@ class Metrics:
     
     def record_value(self, metric_name: str, value: float) -> None:
         """
-        Record a numeric value for a specific metric.
+        Record a numeric value for a specific metric with size limits to prevent memory leaks.
         
         Args:
             metric_name (str): Name of the metric
@@ -83,6 +87,11 @@ class Metrics:
             
             if isinstance(self.metrics[metric_name], list):
                 self.metrics[metric_name].append(value)
+                
+                # Keep the list size bounded to prevent memory leaks
+                if len(self.metrics[metric_name]) > self.max_history_per_metric:
+                    # Only keep the most recent values
+                    self.metrics[metric_name] = self.metrics[metric_name][-self.max_history_per_metric:]
     
     def increment_counter(self, metric_name: str, increment: int = 1) -> None:
         """
@@ -196,4 +205,4 @@ class Metrics:
         return f"Metrics: {json.dumps(summary, indent=2)}"
 
 # Global metrics collector instance
-metrics = Metrics()
+metrics = Metrics(max_history_per_metric=1000)

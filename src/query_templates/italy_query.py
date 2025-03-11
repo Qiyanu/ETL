@@ -2,8 +2,15 @@ from google.cloud import bigquery
 
 def create_italy_query(bq_ops, temp_table_id):
     """Create BigQuery SQL for Italy data with corrected Total Group retention metrics."""
-    # Format the SQL for countries and chain types
-    excluded_chains_sql = ','.join([f"'{chain}'" for chain in bq_ops.config["EXCLUDED_CHAIN_TYPES"]])
+    # Get excluded chain types and prepare parameters
+    excluded_chains = bq_ops.config.get("EXCLUDED_CHAIN_TYPES", [])
+    excluded_chain_params = []
+    
+    # Create parameter placeholders for excluded chains
+    for i, chain in enumerate(excluded_chains):
+        excluded_chain_params.append(f"@excluded_chain_{i}")
+    
+    excluded_chains_sql = ', '.join(excluded_chain_params)
     
     # Get country mappings from config
     country_mapping = bq_ops.config.get("COUNTRY_MAPPING", {"ITA": "IT", "ESP": "SP"})
@@ -17,8 +24,8 @@ def create_italy_query(bq_ops, temp_table_id):
     if not country_mapping_sql:
         country_mapping_sql = "ELSE line.COUNTRY_KEY"  # Default fallback
     
-    # Updated Italy query with dynamic country mapping
-    return f"""
+    # Updated Italy query with dynamic country mapping and parameterized excluded chains
+    query = f"""
     CREATE OR REPLACE TABLE {temp_table_id} AS
     -- Main data aggregation CTE
     WITH data_agg AS (
@@ -61,22 +68,22 @@ def create_italy_query(bq_ops, temp_table_id):
             CAST(NULL AS INT64) AS Families,
             CAST(NULL AS INT64) AS Seniors
 
-        FROM `{bq_ops.config["SOURCE_LINE_TABLE"]}` AS line
+        FROM `{bq_ops.config.get("SOURCE_LINE_TABLE")}` AS line
         -- Use JOIN hints to optimize large joins
-        LEFT JOIN `{bq_ops.config["SOURCE_HEADER_TABLE"]}` AS header
+        LEFT JOIN `{bq_ops.config.get("SOURCE_HEADER_TABLE")}` AS header
           ON line.DATE_KEY = header.DATE_KEY
          AND line.COUNTRY_KEY = header.COUNTRY_KEY
          AND line.SITE_KEY = header.SITE_KEY
          AND line.TRX_KEY = header.TRX_KEY
          AND line.TRX_TYPE = header.TRX_TYPE
          AND line.rec_src = header.rec_src
-        LEFT JOIN `{bq_ops.config["SOURCE_CARD_TABLE"]}` AS card
+        LEFT JOIN `{bq_ops.config.get("SOURCE_CARD_TABLE")}` AS card
           ON header.CARD_KEY = card.CARD_KEY
         -- Use INNER JOIN which is more efficient when we need all records
-        INNER JOIN `{bq_ops.config["SOURCE_SITE_TABLE"]}` AS site
+        INNER JOIN `{bq_ops.config.get("SOURCE_SITE_TABLE")}` AS site
           ON line.SITE_KEY = site.site_key
          AND line.COUNTRY_KEY = site.COUNTRY_KEY
-        INNER JOIN `{bq_ops.config["SOURCE_STORE_TABLE"]}` AS store
+        INNER JOIN `{bq_ops.config.get("SOURCE_STORE_TABLE")}` AS store
           ON site.MAIN_SITE_KEY = store.STORE_KEY
          AND site.COUNTRY_KEY = store.COUNTRY_KEY
 
@@ -105,20 +112,20 @@ def create_italy_query(bq_ops, temp_table_id):
                 WHEN header.ACTIVITY_TYPE = 'ECM' THEN 'E-commerce'
                 ELSE store.CHAIN_TYPE_DESC 
             END AS chain_type_desc
-        FROM `{bq_ops.config["SOURCE_LINE_TABLE"]}` AS line
-        LEFT JOIN `{bq_ops.config["SOURCE_HEADER_TABLE"]}` AS header
+        FROM `{bq_ops.config.get("SOURCE_LINE_TABLE")}` AS line
+        LEFT JOIN `{bq_ops.config.get("SOURCE_HEADER_TABLE")}` AS header
           ON line.DATE_KEY = header.DATE_KEY
          AND line.COUNTRY_KEY = header.COUNTRY_KEY
          AND line.SITE_KEY = header.SITE_KEY
          AND line.TRX_KEY = header.TRX_KEY
          AND line.TRX_TYPE = header.TRX_TYPE
          AND line.rec_src = header.rec_src
-        LEFT JOIN `{bq_ops.config["SOURCE_CARD_TABLE"]}` AS card
+        LEFT JOIN `{bq_ops.config.get("SOURCE_CARD_TABLE")}` AS card
           ON header.CARD_KEY = card.CARD_KEY
-        INNER JOIN `{bq_ops.config["SOURCE_SITE_TABLE"]}` AS site
+        INNER JOIN `{bq_ops.config.get("SOURCE_SITE_TABLE")}` AS site
           ON header.SITE_KEY = site.site_key
          AND header.COUNTRY_KEY = site.COUNTRY_KEY
-        INNER JOIN `{bq_ops.config["SOURCE_STORE_TABLE"]}` AS store
+        INNER JOIN `{bq_ops.config.get("SOURCE_STORE_TABLE")}` AS store
           ON site.MAIN_SITE_KEY = store.STORE_KEY
          AND site.COUNTRY_KEY = store.COUNTRY_KEY
 
@@ -142,20 +149,20 @@ def create_italy_query(bq_ops, temp_table_id):
                 WHEN header.ACTIVITY_TYPE = 'ECM' THEN 'E-commerce'
                 ELSE store.CHAIN_TYPE_DESC
             END AS chain_type_desc
-        FROM `{bq_ops.config["SOURCE_LINE_TABLE"]}` AS line
-        LEFT JOIN `{bq_ops.config["SOURCE_HEADER_TABLE"]}` AS header
+        FROM `{bq_ops.config.get("SOURCE_LINE_TABLE")}` AS line
+        LEFT JOIN `{bq_ops.config.get("SOURCE_HEADER_TABLE")}` AS header
           ON line.DATE_KEY = header.DATE_KEY
          AND line.COUNTRY_KEY = header.COUNTRY_KEY
          AND line.SITE_KEY = header.SITE_KEY
          AND line.TRX_KEY = header.TRX_KEY
          AND line.TRX_TYPE = header.TRX_TYPE
          AND line.rec_src = header.rec_src
-        LEFT JOIN `{bq_ops.config["SOURCE_CARD_TABLE"]}` AS card
+        LEFT JOIN `{bq_ops.config.get("SOURCE_CARD_TABLE")}` AS card
           ON header.CARD_KEY = card.CARD_KEY
-        INNER JOIN `{bq_ops.config["SOURCE_SITE_TABLE"]}` AS site
+        INNER JOIN `{bq_ops.config.get("SOURCE_SITE_TABLE")}` AS site
           ON line.SITE_KEY = site.site_key
          AND line.COUNTRY_KEY = site.COUNTRY_KEY
-        INNER JOIN `{bq_ops.config["SOURCE_STORE_TABLE"]}` AS store
+        INNER JOIN `{bq_ops.config.get("SOURCE_STORE_TABLE")}` AS store
           ON site.MAIN_SITE_KEY = store.STORE_KEY
          AND site.COUNTRY_KEY = store.COUNTRY_KEY
 
@@ -348,3 +355,13 @@ def create_italy_query(bq_ops, temp_table_id):
     WHERE data_agg.month IS NOT NULL
       AND data_agg.country_key IS NOT NULL
     """
+    
+    # Create parameters list for the query
+    params = [bigquery.ScalarQueryParameter("theMonth", "DATE", None)]  # Main parameter for @theMonth
+    
+    # Add parameters for excluded chains
+    for i, chain in enumerate(excluded_chains):
+        params.append(bigquery.ScalarQueryParameter(f"excluded_chain_{i}", "STRING", chain))
+    
+    # Return both the query and the parameters
+    return query, params

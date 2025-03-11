@@ -151,6 +151,7 @@ class BigQueryConnectionPool:
         self.config = config
         self.pool_size = config.get("MAX_CONNECTIONS", 10)
         self.location = config.get("LOCATION", "EU")
+        self.max_total_connections = config.get("MAX_TOTAL_CONNECTIONS", self.pool_size * 2)
         
         # Connection pool management
         self.available_clients: List[bigquery.Client] = []
@@ -186,13 +187,13 @@ class BigQueryConnectionPool:
     
     def get_client(self) -> bigquery.Client:
         """
-        Retrieve a BigQuery client from the pool.
+        Retrieve a BigQuery client from the pool with proper resource limits.
         
         Returns:
             bigquery.Client: A BigQuery client instance
         
         Raises:
-            RuntimeError: If the connection pool is shutting down
+            RuntimeError: If the connection pool is shutting down or resource limits exceeded
         """
         if self.shutdown_requested:
             raise RuntimeError("Connection pool is shutting down, no new connections allowed")
@@ -204,16 +205,32 @@ class BigQueryConnectionPool:
             with self.lock:
                 self.checkout_count += 1
                 
+                # Check if we are at the maximum allowed total connections
+                total_connections = len(self.in_use_clients) + len(self.available_clients)
+                if total_connections >= self.max_total_connections and not self.available_clients:
+                    logger.warning(
+                        f"Maximum connection limit reached: {total_connections}/{self.max_total_connections} "
+                        f"(in-use: {len(self.in_use_clients)}, available: {len(self.available_clients)})"
+                    )
+                    raise RuntimeError(f"Maximum BigQuery connection limit reached ({self.max_total_connections})")
+                
                 if self.available_clients:
                     # Reuse an existing client from the pool
                     client = self.available_clients.pop()
                     self.in_use_clients.add(client)
                     return client
                 
-                # No available clients, create a new one
+                # No available clients, create a new one if under the limit
                 client = self._create_client()
                 self.in_use_clients.add(client)
                 self.created_connections += 1
+                
+                # Log connection creation
+                logger.info(
+                    f"Created new BigQuery client. Total: {total_connections + 1}, "
+                    f"In-use: {len(self.in_use_clients)}, Available: {len(self.available_clients)}"
+                )
+                
                 return client
         except Exception as e:
             # Release semaphore on error
@@ -258,8 +275,8 @@ class BigQueryConnectionPool:
                 else:
                     # During normal operation, check if client is still usable
                     try:
-                        # Simple health check query
-                        client.query("SELECT 1").result(timeout=5)
+                        # Simple health check query with reduced timeout
+                        client.query("SELECT 1").result(timeout=2)
                         
                         # Client is healthy, return to pool if we have space
                         if len(self.available_clients) < self.pool_size:
@@ -337,6 +354,7 @@ class BigQueryConnectionPool:
         with self.lock:
             return {
                 "pool_size": self.pool_size,
+                "max_total_connections": self.max_total_connections,
                 "available_connections": len(self.available_clients),
                 "in_use_connections": len(self.in_use_clients),
                 "total_created_connections": self.created_connections,

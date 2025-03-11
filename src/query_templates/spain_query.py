@@ -6,20 +6,30 @@ def create_spain_query(bq_ops, temp_table_id):
     spain_filters = bq_ops.config.get("SPAIN_FILTERS", {})
     excluded_business_brands = spain_filters.get("excluded_business_brands", ["supeco"])
     
-    # Format excluded business brands
-    excluded_business_brands_sql = " OR ".join([f"lower(header.business_brand) = '{brand.lower()}'" for brand in excluded_business_brands])
-    if excluded_business_brands_sql:
+    # Prepare parameter placeholders for excluded business brands
+    excluded_business_params = []
+    for i, brand in enumerate(excluded_business_brands):
+        excluded_business_params.append(f"@excluded_brand_{i}")
+    
+    # Format excluded business brands using parameter placeholders
+    if excluded_business_params:
+        excluded_business_brands_sql = " OR ".join([f"lower(header.business_brand) = {param}" for param in excluded_business_params])
         excluded_business_brands_condition = f"AND NOT ({excluded_business_brands_sql})"
     else:
         excluded_business_brands_condition = ""
         
-    # Format ECM exclusions
+    # Format ECM exclusions using parameter placeholders
     ecm_exclusions = spain_filters.get("excluded_ecm_combinations", [])
     ecm_conditions = []
-    for exclusion in ecm_exclusions:
+    ecm_params = []
+    
+    for i, exclusion in enumerate(ecm_exclusions):
         conditions = []
         for key, value in exclusion.items():
-            conditions.append(f"header.{key} = '{value}'")
+            param_name = f"@ecm_param_{i}_{key}"
+            conditions.append(f"header.{key} = {param_name}")
+            ecm_params.append((param_name, value))
+    
         if conditions:
             ecm_conditions.append(" AND ".join(conditions))
     
@@ -40,8 +50,8 @@ def create_spain_query(bq_ops, temp_table_id):
     if not country_mapping_sql:
         country_mapping_sql = "ELSE line.COUNTRY_KEY"  # Default fallback
 
-    # Updated Spain query with fixed Total Group retention metrics
-    return f"""
+    # Updated Spain query with fixed Total Group retention metrics and parameterized queries
+    query = f"""
     CREATE OR REPLACE TABLE {temp_table_id} AS
     WITH data_agg AS (
         SELECT
@@ -348,3 +358,19 @@ def create_spain_query(bq_ops, temp_table_id):
     WHERE a.month IS NOT NULL
       AND a.COUNTRY_KEY IS NOT NULL
     """
+    
+    # Create parameters list for the query
+    params = [bigquery.ScalarQueryParameter("theMonth", "DATE", None)]  # Main parameter for @theMonth
+    
+    # Add parameters for excluded business brands
+    for i, brand in enumerate(excluded_business_brands):
+        params.append(bigquery.ScalarQueryParameter(f"excluded_brand_{i}", "STRING", brand.lower()))
+    
+    # Add parameters for ECM exclusions
+    for param_name, value in ecm_params:
+        # Extract parameter name without the @ symbol
+        clean_param_name = param_name[1:]
+        params.append(bigquery.ScalarQueryParameter(clean_param_name, "STRING", value))
+    
+    # Return both the query and the parameters
+    return query, params

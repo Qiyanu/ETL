@@ -15,7 +15,7 @@ from src.etl_processors import (
     create_customer_data_table_if_not_exists,
     process_month_range
 )
-from src.shutdown_utils import is_shutdown_requested, request_shutdown
+from src.shutdown_utils import is_shutdown_requested, request_shutdown, initialize_shutdown_handler
 
 def main():
     """
@@ -42,6 +42,17 @@ def main():
             logger.error(f"Failed to load configuration: {e}")
             sys.exit(1)
         
+        # Initialize the shutdown handler with the loaded configuration
+        initialize_shutdown_handler(config.get("_NESTED_CONFIG", {}))
+        
+        # Initialize metrics with proper size limits
+        metrics_limit = config.get("METRICS_MAX_HISTORY", 1000)
+        if not isinstance(metrics.max_history_per_metric, int) or metrics.max_history_per_metric != metrics_limit:
+            # Re-initialize the metrics collector with the correct limit
+            from src.metrics import Metrics
+            global metrics
+            metrics = Metrics(max_history_per_metric=metrics_limit)
+        
         # Initialize BigQuery operations
         try:
             bq_ops = BigQueryOperations(config)
@@ -54,11 +65,11 @@ def main():
         
         try:
             # Determine date range to process
-            if config["START_MONTH"] and config["END_MONTH"]:
+            if config.get("START_MONTH") and config.get("END_MONTH"):
                 # Use explicitly configured start and end months
                 start_month = datetime.strptime(config["START_MONTH"], '%Y-%m-%d').date()
                 end_month = datetime.strptime(config["END_MONTH"], '%Y-%m-%d').date()
-            elif config["LAST_N_MONTHS"]:
+            elif config.get("LAST_N_MONTHS"):
                 # Process the last N months
                 last_n_months = int(config["LAST_N_MONTHS"])
                 end_month = date.today().replace(day=1) - relativedelta(days=1)
@@ -78,8 +89,8 @@ def main():
                 raise ValueError(f"Date range too large: {start_month} to {end_month} spans more than 36 months")
             
             # Log parameters
-            logger.info(f"Processing from {start_month} to {end_month}, parallel={config['PARALLEL']}")
-            logger.info(f"Countries to process: {', '.join(config['ALLOWED_COUNTRIES'])}")
+            logger.info(f"Processing from {start_month} to {end_month}, parallel={config.get('PARALLEL', True)}")
+            logger.info(f"Countries to process: {', '.join(config.get('ALLOWED_COUNTRIES', []))}")
             
             # Ensure destination table exists with optimal schema
             create_customer_data_table_if_not_exists(bq_ops)
@@ -89,7 +100,7 @@ def main():
                 bq_ops, 
                 start_month, 
                 end_month, 
-                config["PARALLEL"], 
+                config.get("PARALLEL", True), 
                 request_id
             )
             
@@ -103,7 +114,7 @@ def main():
                 "job_id": job_id,
                 "start_month": start_month.isoformat(),
                 "end_month": end_month.isoformat(),
-                "countries": config["ALLOWED_COUNTRIES"],
+                "countries": config.get("ALLOWED_COUNTRIES", []),
                 "successful_months": successful_months,
                 "failed_months": failed_months,
                 "processing_time_seconds": round(elapsed, 2),

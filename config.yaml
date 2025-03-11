@@ -1,12 +1,8 @@
-# Optimized BigQuery ETL Configuration File
-# For Cloud Run Job
+# ETL Configuration for Customer Data Processing
 
-# Database Table Configuration
+# BigQuery Table Configuration
 tables:
-  # Destination table where processed data will be stored
   destination: "c4-marketing-dev-347012.customer_data.customer_data_test"
-  
-  # Source tables containing raw data (shared by all countries)
   sources:
     line_table: "c4-united-datasharing-prd.datasharing_marketing_group_dashboard.a_ww_sales_trx_line"
     header_table: "c4-united-datasharing-prd.datasharing_marketing_group_dashboard.a_ww_sales_trx_header"
@@ -16,122 +12,64 @@ tables:
 
 # Processing Configuration
 processing:
-  # Maximum number of concurrent worker threads for parallel processing
-  # Increased from 4 to 8 for better parallelism
+  # Maximum number of concurrent workers
   max_workers: 8
   
-  # Maximum time in seconds to wait for a query to complete
+  # Query timeout in seconds
   query_timeout: 3600
   
-  # BigQuery geographic location for datasets and jobs
+  # BigQuery geographic location
   location: "EU"
-  max_connections: 10
-  connection_pool_shutdown_timeout: 60
-  memory_per_worker_mb: 2048
-  target_memory_usage: 0.6
-  memory_scale_up_threshold: 0.75
-  memory_scale_down_threshold: 0.45
 
-# BigQuery Performance Configuration
-bigquery:
-  use_query_cache: true
-  create_disposition: CREATE_IF_NEEDED
-  write_disposition: WRITE_TRUNCATE
-  priority: INTERACTIVE
-  maximum_bytes_billed: 1000000000000
-  use_legacy_sql: false
-  # New batch processing settings for improved performance
-  query_batch_size: 100
-  # Enable partition pruning by default
-  enable_partitioning: true
-  # Enable table snapshots for faster recovery
-  enable_snapshots: true
-
-# Data Filtering Configuration
+# Filtering Configuration
 filters:
-  # List of country codes to include in processing
+  # Countries to process
   allowed_countries:
     - "ITA"
     - "ESP"
   
-  # Country code mappings in destination table
+  # Country code mappings
   country_mapping:
     "ITA": "IT"
     "ESP": "SP"
   
-  # List of chain types to exclude from processing
+  # Excluded chain types
   excluded_chain_types:
     - "SUPECO"
     - "Galerie"
     - "AUTRES"
-  
-  # Spain-specific filters
-  spain_filters:
-    excluded_business_brands:
-      - "supeco"
-    excluded_ecm_combinations:
-      - delivery_channel: "PICKUP_STORE"
-      - business_service: "Home Delivery Non Food"
 
-# Error Handling and Resilience
+# Job Configuration
+job:
+  # Maximum runtime in seconds (24 hours)
+  max_runtime: 86400
+  
+  # Safety margin before job timeout (30 minutes)
+  timeout_safety_margin: 1800
+  
+  # Optional: Specify specific months to process
+  # start_month: "2025-01-01"
+  # end_month: "2025-02-01"
+  
+  # Or process last N months
+  last_n_months: 3
+  
+  # Whether to process months in parallel
+  parallel: true
+
+# Resilience Configuration
 resilience:
-  # Whether to enable automatic retries for transient failures
+  # Enable automatic retries for transient failures
   enable_retries: true
   
-  # Maximum number of retry attempts before giving up
-  max_retry_attempts: 5  # Increased for better reliability
+  # Maximum retry attempts
+  max_retry_attempts: 5
   
-  # Number of consecutive failures before circuit breaker opens
+  # Circuit breaker settings
   circuit_breaker_threshold: 5
-  
-  # Seconds to wait before attempting to close an open circuit
   circuit_breaker_timeout: 300
-  
-  # New exponential backoff settings for retries
-  retry_initial_delay_ms: 1000
-  retry_max_delay_ms: 60000
-  retry_multiplier: 2.0
-
-# Temporary Table Management
-temp_tables:
-  # Set expiration for temporary tables (in hours)
-  expiration_hours: 24
-  
-  # Whether to add tracing info to table descriptions
-  add_descriptions: true
-  
-  # Dedicated dataset for temporary tables
-  use_dedicated_dataset: true
-  dedicated_dataset: "temp_processing"
 
 # Logging Configuration
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR, or CRITICAL
   level: "INFO"
-  
-  # New structured logging options
-  enable_structured_logging: true
-  include_query_stats: true
-
-# Cloud Run Job Specific Settings
-job:
-  # Maximum runtime in seconds (24 hours)
-  max_runtime: 86400
-  
-  # Safety margin in seconds before job timeout (30 minutes)
-  timeout_safety_margin: 1800
-  
-  # Default date range to process (if not provided via environment variables)
-  # Format: YYYY-MM-DD
-  # start_month: "2025-01-01" 
-  # end_month: "2025-02-01"
-  
-  # Alternative: process the last N months 
-  last_n_months: 3
-  
-  # Whether to process months in parallel
-  parallel: true
-  
-  # New memory-optimized settings
-  memory_limit_gb: 8
-  cpu_limit: 2

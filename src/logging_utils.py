@@ -26,14 +26,14 @@ class ETLLogger:
             log_level (str, optional): Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         """
         # Create logger
-        self.logger = logging.getLogger("etl")
+        self._logger = logging.getLogger("etl")
         
         # Clear existing handlers to avoid duplication
-        if self.logger.handlers:
-            self.logger.handlers.clear()
+        if self._logger.handlers:
+            self._logger.handlers.clear()
         
         # Set service name
-        self.service = service_name or os.environ.get("K_SERVICE", "local")
+        self._service = service_name or os.environ.get("K_SERVICE", "local")
         
         # Add thread-safe context tracking
         self._thread_local = threading.local()
@@ -41,7 +41,7 @@ class ETLLogger:
         
         # Set log level
         log_level = log_level or os.environ.get("LOG_LEVEL", "INFO")
-        self.logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+        self._logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
         
         # Create a proper reference to the logger instance for the filter
         logger_instance = self
@@ -51,7 +51,7 @@ class ETLLogger:
                 # Get correlation ID from the thread-local storage
                 thread_local_id = getattr(logger_instance._thread_local, 'correlation_id', 'not-set')
                 record.correlation_id = thread_local_id
-                record.service = logger_instance.service
+                record.service = logger_instance._service
                 return True
         
         # Create handler for stdout (cloud-friendly)
@@ -70,23 +70,23 @@ class ETLLogger:
             })
         )
         handler.setFormatter(formatter)
-        self.logger.addHandler(handler)
+        self._logger.addHandler(handler)
         
         # Add context filter
         context_filter = ContextFilter()
-        self.logger.addFilter(context_filter)
+        self._logger.addFilter(context_filter)
     
     def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
         """Log a debug message."""
-        self.logger.debug(msg, *args, **kwargs)
+        self._logger.debug(msg, *args, **kwargs)
     
     def info(self, msg: str, *args: Any, **kwargs: Any) -> None:
         """Log an info message."""
-        self.logger.info(msg, *args, **kwargs)
+        self._logger.info(msg, *args, **kwargs)
     
     def warning(self, msg: str, *args: Any, **kwargs: Any) -> None:
         """Log a warning message."""
-        self.logger.warning(msg, *args, **kwargs)
+        self._logger.warning(msg, *args, **kwargs)
     
     def error(self, msg: str, *args: Any, **kwargs: Any) -> None:
         """
@@ -94,11 +94,11 @@ class ETLLogger:
         
         Optionally includes traceback if exc_info is True.
         """
-        self.logger.error(msg, *args, **kwargs)
+        self._logger.error(msg, *args, **kwargs)
     
     def critical(self, msg: str, *args: Any, **kwargs: Any) -> None:
         """Log a critical message."""
-        self.logger.critical(msg, *args, **kwargs)
+        self._logger.critical(msg, *args, **kwargs)
     
     def log_error_with_trace(self, error: Union[Exception, str]) -> None:
         """
@@ -116,12 +116,6 @@ class ETLLogger:
             # Log string error message
             self.error(str(error))
     
-    @property
-    def correlation_id(self) -> str:
-        """Get the current correlation ID for this thread."""
-        return getattr(self._thread_local, 'correlation_id', 'not-set')
-    
-    @correlation_id.setter
     def set_correlation_id(self, correlation_id: str) -> None:
         """
         Set a correlation ID for tracking related log entries.
@@ -139,8 +133,8 @@ class ETLLogger:
         Args:
             service_name (str): Name of the service/application
         """
-        self.service = service_name
+        self._service = service_name
 
-# Create a global logger instance with better thread safety
+# Global logger instance with better thread safety
 # This can be imported and used across the application
 logger = ETLLogger()

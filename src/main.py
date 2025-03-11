@@ -3,7 +3,6 @@ import sys
 import time
 import uuid
 import json
-import traceback
 from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 
@@ -47,11 +46,9 @@ def main():
         
         # Initialize metrics with proper size limits
         metrics_limit = config.get("METRICS_MAX_HISTORY", 1000)
-        if not isinstance(metrics.max_history_per_metric, int) or metrics.max_history_per_metric != metrics_limit:
-            # Re-initialize the metrics collector with the correct limit
-            from src.metrics import Metrics
-            global metrics
-            metrics = Metrics(max_history_per_metric=metrics_limit)
+        from src.metrics import Metrics
+        global metrics
+        metrics = Metrics(max_history_per_metric=metrics_limit)
         
         # Initialize BigQuery operations
         try:

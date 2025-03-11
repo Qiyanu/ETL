@@ -3,9 +3,37 @@ import yaml
 import logging
 from typing import Dict, Any, Tuple, List, Union
 
+def _sanitize_table_reference(table_id: str) -> str:
+    """
+    Sanitize a BigQuery table reference to prevent injection attacks.
+    
+    Args:
+        table_id: Table ID to sanitize
+        
+    Returns:
+        str: Sanitized table ID
+    
+    Raises:
+        ValueError: If table ID is invalid
+    """
+    # Validate table reference format
+    parts = table_id.strip().split('.')
+    if len(parts) != 3:
+        raise ValueError(f"Invalid table reference: '{table_id}'. Expected format: 'project.dataset.table'")
+    
+    # Check each part against allowed patterns
+    for i, part in enumerate(parts):
+        # BigQuery naming rules: letters, numbers, and underscores
+        if not all(c.isalnum() or c == '_' or c == '-' for c in part):
+            part_name = ["project", "dataset", "table"][i]
+            raise ValueError(f"Invalid {part_name} name '{part}' in table reference")
+    
+    return '.'.join(parts)
+
 def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """
     Validate the ETL configuration for required values and proper types.
+    Enhanced with additional security checks and validations.
     
     Args:
         config: Configuration dictionary to validate
@@ -50,6 +78,10 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
         
         # Ensure all country codes are supported by query templates
         for country in config["ALLOWED_COUNTRIES"]:
+            if not isinstance(country, str):
+                errors.append(f"Country code must be a string, got: {type(country).__name__}")
+                continue
+                
             if country not in ["ITA", "ESP"]:
                 errors.append(f"Unsupported country code: {country}. Only ITA and ESP are supported.")
             
@@ -67,15 +99,17 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
         elif config["QUERY_TIMEOUT"] > 86400:
             errors.append("QUERY_TIMEOUT is too large (>24 hours), please verify")
     
-    # Validate table names have the proper format
+    # Validate table names have the proper format and sanitize them
     table_keys = ["DEST_TABLE", "SOURCE_LINE_TABLE", "SOURCE_HEADER_TABLE", 
                  "SOURCE_CARD_TABLE", "SOURCE_SITE_TABLE", "SOURCE_STORE_TABLE"]
                  
     for key in table_keys:
         if key in config and isinstance(config[key], str):
-            table_parts = config[key].split('.')
-            if len(table_parts) != 3:
-                errors.append(f"{key} should have format 'project.dataset.table', got: {config[key]}")
+            try:
+                # Sanitize and validate table references
+                config[key] = _sanitize_table_reference(config[key])
+            except ValueError as e:
+                errors.append(f"Invalid {key}: {str(e)}")
     
     # Validate memory settings if present
     if "MEMORY_PER_WORKER_MB" in config:
@@ -104,24 +138,37 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
         isinstance(config["COUNTRY_MAPPING"], dict) and 
         "ALLOWED_COUNTRIES" in config and 
         isinstance(config["ALLOWED_COUNTRIES"], list)):
+        
+        # Validate country mapping keys and values
+        for country, mapping in config["COUNTRY_MAPPING"].items():
+            if not isinstance(country, str):
+                errors.append(f"Country mapping key must be a string, got: {type(country).__name__}")
+            if not isinstance(mapping, str):
+                errors.append(f"Country mapping value for '{country}' must be a string, got: {type(mapping).__name__}")
+        
+        # Check for missing mappings
         for country in config["ALLOWED_COUNTRIES"]:
-            if country not in config["COUNTRY_MAPPING"]:
+            if isinstance(country, str) and country not in config["COUNTRY_MAPPING"]:
                 errors.append(f"Missing country mapping for {country}")
                 
-    # Validate date settings
+    # Validate date settings with improved error messages
     if "START_MONTH" in config and config["START_MONTH"]:
         try:
             from datetime import datetime
             datetime.strptime(config["START_MONTH"], '%Y-%m-%d')
-        except ValueError:
-            errors.append("START_MONTH must be in YYYY-MM-DD format")
+        except ValueError as e:
+            errors.append(f"START_MONTH must be in YYYY-MM-DD format: {str(e)}")
+        except TypeError:
+            errors.append(f"START_MONTH must be a string, got: {type(config['START_MONTH']).__name__}")
             
     if "END_MONTH" in config and config["END_MONTH"]:
         try:
             from datetime import datetime
             datetime.strptime(config["END_MONTH"], '%Y-%m-%d')
-        except ValueError:
-            errors.append("END_MONTH must be in YYYY-MM-DD format")
+        except ValueError as e:
+            errors.append(f"END_MONTH must be in YYYY-MM-DD format: {str(e)}")
+        except TypeError:
+            errors.append(f"END_MONTH must be a string, got: {type(config['END_MONTH']).__name__}")
             
     if "LAST_N_MONTHS" in config and config["LAST_N_MONTHS"]:
         try:
@@ -130,11 +177,69 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
                 errors.append("LAST_N_MONTHS must be at least 1")
             elif last_n > 36:
                 errors.append("LAST_N_MONTHS is suspiciously large (>36), please verify")
-        except (ValueError, TypeError):
-            errors.append("LAST_N_MONTHS must be an integer")
+        except (ValueError, TypeError) as e:
+            errors.append(f"LAST_N_MONTHS must be an integer: {str(e)}")
     
+    # Check for potentially dangerous settings
+    if "MAXIMUM_BYTES_BILLED" in config:
+        try:
+            max_bytes = int(config["MAXIMUM_BYTES_BILLED"])
+            # Check if unusually high (> 10TB)
+            if max_bytes > 10 * 1024**4:  
+                errors.append(f"MAXIMUM_BYTES_BILLED is suspiciously high: {max_bytes} bytes")
+        except (ValueError, TypeError):
+            errors.append("MAXIMUM_BYTES_BILLED must be a number")
+    
+    # Validate worker history limits are set
+    if "MAX_HISTORY_SIZE" not in config:
+        config["MAX_HISTORY_SIZE"] = 100  # Set a default
+        
     # Return validation result
     return len(errors) == 0, errors
+
+def _convert_env_value(default_value: Any, env_value: str) -> Any:
+    """
+    Convert environment variable to appropriate type based on default value.
+    With improved error handling and type safety.
+    
+    Args:
+        default_value: Original default value defining the expected type
+        env_value: Environment variable value as string
+        
+    Returns:
+        Converted value matching the type of default_value
+    """
+    try:
+        if default_value is None:
+            return env_value
+        
+        default_type = type(default_value)
+        
+        if default_type == list:
+            return env_value.split(",")
+        elif default_type == bool:
+            return env_value.lower() in ('true', 'yes', '1', 't', 'y')
+        elif default_type == int:
+            return int(env_value)
+        elif default_type == float:
+            return float(env_value)
+        elif default_type == dict:
+            # For dictionaries, use JSON format in environment variable
+            import json
+            try:
+                result = json.loads(env_value)
+                if not isinstance(result, dict):
+                    logging.warning(f"JSON parsed from environment variable is not a dictionary: {env_value}")
+                    return default_value
+                return result
+            except json.JSONDecodeError as e:
+                logging.warning(f"Invalid JSON in environment variable: {env_value}. Error: {e}")
+                return default_value
+        else:
+            return env_value
+    except (ValueError, TypeError) as e:
+        logging.warning(f"Invalid env value for key: {env_value}, using default. Error: {e}")
+        return default_value
 
 def load_config(config_file=None) -> Dict[str, Any]:
     """
@@ -202,6 +307,12 @@ def load_config(config_file=None) -> Dict[str, Any]:
         "MEMORY_PER_WORKER_MB": 512,  # 512MB per worker
         "MEMORY_SAFETY_FACTOR": 1.2,  # 20% safety margin for memory allocation
         "SERVICE_NAME": "customer-data-etl",
+        # Maximum history size for worker scaling adjustments
+        "MAX_HISTORY_SIZE": 100,
+        # Retry parameters
+        "RETRY_INITIAL_DELAY_MS": 1000,  # 1 second
+        "RETRY_MAX_DELAY_MS": 60000,  # 60 seconds
+        "RETRY_MULTIPLIER": 2.0,
     }
     
     # Try to load from YAML file if provided
@@ -368,42 +479,3 @@ def load_config(config_file=None) -> Dict[str, Any]:
         config["DEST_TABLE_NAME"] = parts[2]
     
     return config
-
-def _convert_env_value(default_value: Any, env_value: str) -> Any:
-    """
-    Convert environment variable to appropriate type based on default value.
-    
-    Args:
-        default_value: Original default value defining the expected type
-        env_value: Environment variable value as string
-        
-    Returns:
-        Converted value matching the type of default_value
-    """
-    try:
-        if default_value is None:
-            return env_value
-        
-        default_type = type(default_value)
-        
-        if default_type == list:
-            return env_value.split(",")
-        elif default_type == bool:
-            return env_value.lower() in ('true', 'yes', '1', 't', 'y')
-        elif default_type == int:
-            return int(env_value)
-        elif default_type == float:
-            return float(env_value)
-        elif default_type == dict:
-            # For dictionaries, use JSON format in environment variable
-            import json
-            try:
-                return json.loads(env_value)
-            except json.JSONDecodeError:
-                logging.warning(f"Invalid JSON in environment variable: {env_value}")
-                return default_value
-        else:
-            return env_value
-    except (ValueError, TypeError) as e:
-        logging.warning(f"Invalid env value for key: {env_value}, using default. Error: {e}")
-        return default_value

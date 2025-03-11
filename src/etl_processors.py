@@ -287,12 +287,10 @@ def process_month_for_country(bq_ops, the_month, country, request_id):
     
     metrics.start_timer(f"process_month_{the_month.strftime('%Y%m')}_{country}")
     temp_table_id = f"{bq_ops.config['DEST_PROJECT']}.{bq_ops.config['DEST_DATASET']}.temp_data_{country}_{the_month.strftime('%Y%m')}_{request_id}"
-    temp_table_created = False
     
     try:
         # Create a temp table with the aggregated data for this country
         create_temp_table_for_month(bq_ops, the_month, temp_table_id, country, request_id)
-        temp_table_created = True
         
         # Insert the data into the final table
         rows_inserted = insert_from_temp_to_final(bq_ops, temp_table_id, the_month)
@@ -306,8 +304,23 @@ def process_month_for_country(bq_ops, the_month, country, request_id):
     finally:
         # Always clean up temp table, regardless of success or failure
         metrics.stop_timer(f"process_month_{the_month.strftime('%Y%m')}_{country}")
-        if temp_table_created:
-            delete_temp_table(bq_ops, temp_table_id)
+        try:
+            # Check if table exists before attempting to delete
+            table_exists = False
+            try:
+                bq_ops.get_table(temp_table_id)
+                table_exists = True
+            except Exception:
+                table_exists = False
+                
+            if table_exists:
+                logger.info(f"Cleaning up temporary table: {temp_table_id}")
+                delete_temp_table(bq_ops, temp_table_id)
+            else:
+                logger.info(f"No temporary table to clean up: {temp_table_id}")
+        except Exception as cleanup_error:
+            # Log but don't fail if cleanup fails
+            logger.warning(f"Failed to clean up temporary table {temp_table_id}: {cleanup_error}")
 
 def process_month(bq_ops, the_month, request_id):
     """
@@ -353,6 +366,246 @@ def process_month(bq_ops, the_month, request_id):
     finally:
         # Record metrics
         metrics.stop_timer(f"process_month_{the_month.strftime('%Y%m')}")
+
+def wait_for_futures(futures, timeout=None, done_set=None):
+    """
+    Safer alternative to as_completed that works with timeouts.
+    
+    Args:
+        futures: List of futures to wait for
+        timeout: Maximum time to wait in seconds
+        done_set: Set of already processed futures to exclude
+        
+    Returns:
+        Tuple[Set, Set]: Newly completed futures and remaining futures
+    """
+    if done_set is None:
+        done_set = set()
+    
+    end_time = None if timeout is None else time.time() + timeout
+    new_done = set()
+    remaining = set(futures)
+    
+    # Remove already processed futures
+    remaining -= done_set
+    
+    # Early return if nothing to wait for
+    if not remaining:
+        return new_done, remaining
+    
+    # Wait until timeout or all futures complete
+    while remaining:
+        # Check if timeout expired
+        if end_time is not None and time.time() >= end_time:
+            break
+            
+        # Check each future
+        newly_done_in_iteration = set()
+        for future in list(remaining):
+            if future.done():
+                newly_done_in_iteration.add(future)
+                
+        # Update our sets
+        new_done.update(newly_done_in_iteration)
+        remaining -= newly_done_in_iteration
+                
+        # If nothing completed yet and we still have work, sleep briefly
+        if not newly_done_in_iteration and remaining:
+            time.sleep(0.1)
+            
+        # If all done, break early
+        if not remaining:
+            break
+            
+    return new_done, remaining
+
+def process_all_country_month_combinations(bq_ops, months, countries, request_id):
+    """
+    Process all country/month combinations with adaptive worker scaling and improved future handling.
+    
+    Args:
+        bq_ops (BigQueryOperations): BigQuery operations instance
+        months (List[date]): Months to process
+        countries (List[str]): Countries to process
+        request_id (str): Unique request identifier
+    
+    Returns:
+        Tuple[int, int, int, Set[Tuple[date, str]]]: 
+        - Successful combinations count
+        - Failed combinations count
+        - Total rows processed
+        - Set of failed (month, country) pairs
+    """
+    logger.info(f"Processing {len(months)} months × {len(countries)} countries in parallel")
+    
+    # Generate all combinations
+    combinations = [(month, country) for month in months for country in countries]
+    total_combinations = len(combinations)
+    
+    # Record total work
+    metrics.record_value("total_combinations", total_combinations)
+    
+    # Start timer for whole batch
+    metrics.start_timer("process_all_combinations")
+    
+    # Initialize worker scaler
+    worker_scaler = AdaptiveWorkerScaler(bq_ops.config)
+    
+    # Initialize tracking variables
+    successful_combinations = 0
+    failed_combinations = 0
+    failed_combination_pairs = set()
+    total_rows = 0
+    
+    # Track jobs
+    pending_futures = {}
+    completed_futures = {}
+    futures_to_combinations = {}  # Reverse mapping from future to combination
+    
+    try:
+        # Start with dynamic worker count
+        initial_workers = worker_scaler.get_worker_count()
+        logger.info(f"Starting with {initial_workers} workers for {total_combinations} combinations")
+        
+        # Create a dynamic worker pool with adaptive semaphore
+        max_possible_workers = bq_ops.config.get("MAX_WORKERS", 8)
+        worker_semaphore = AdaptiveSemaphore(initial_workers)
+        
+        # Create a fixed-size thread pool with the maximum possible workers
+        with ThreadPoolExecutor(max_workers=max_possible_workers) as executor:
+            def submit_with_semaphore(fn, *args, **kwargs):
+                """Submit a task that acquires and releases the worker semaphore."""
+                acquired = False
+                try:
+                    # Use a timeout to prevent potential deadlocks
+                    acquired = worker_semaphore.acquire(timeout=60)
+                    if not acquired:
+                        logger.warning("Failed to acquire worker semaphore after timeout")
+                        return None
+                        
+                    future = executor.submit(fn, *args, **kwargs)
+                    # Add callback to release semaphore when done
+                    future.add_done_callback(lambda f: worker_semaphore.release())
+                    return future
+                except Exception as e:
+                    # Important: If we fail after acquiring, make sure to release
+                    if acquired:
+                        worker_semaphore.release()
+                    logger.error(f"Error submitting task: {e}")
+                    return None
+            
+            # Submit initial batch of jobs
+            for idx, (month, country) in enumerate(combinations):
+                if is_shutdown_requested():
+                    logger.warning("Shutdown requested, stopping submissions")
+                    break
+                    
+                combo_id = f"{request_id}_{month.strftime('%Y%m')}_{country}"
+                
+                # Submit task with semaphore control
+                future = submit_with_semaphore(
+                    process_month_for_country, bq_ops, month, country, combo_id
+                )
+                
+                if future:
+                    pending_futures[(month, country)] = future
+                    futures_to_combinations[future] = (month, country)  # Add reverse mapping
+                else:
+                    failed_combinations += 1
+                    failed_combination_pairs.add((month, country))
+                    logger.error(f"Failed to submit task for {month}/{country}")
+            
+            # Keep track of completed futures
+            done_futures = set()
+            
+            # Process results as they complete
+            while pending_futures:
+                try:
+                    # Check if we need to adjust worker count
+                    new_worker_count = worker_scaler.get_worker_count()
+                    
+                    # Update semaphore count if worker count changed
+                    if new_worker_count != worker_semaphore.current_value:
+                        worker_semaphore.adjust_value(new_worker_count)
+                    
+                    # Check for completed futures with a timeout to prevent hanging
+                    try:
+                        # Wait for a batch of futures to complete
+                        newly_done, _ = wait_for_futures(
+                            list(pending_futures.values()), 
+                            timeout=60,
+                            done_set=done_futures
+                        )
+                    except Exception as e:
+                        logger.warning(f"Timeout waiting for futures to complete: {e}")
+                        # Check for any completed futures without waiting
+                        newly_done = {f for f in pending_futures.values() if f.done()} - done_futures
+                        if not newly_done:
+                            time.sleep(5)  # Avoid high CPU if stuck
+                            continue
+                    
+                    done_futures.update(newly_done)
+                    
+                    # Process completed futures
+                    for future in newly_done:
+                        # Find which combination this future belongs to using our reverse mapping
+                        if future in futures_to_combinations:
+                            month, country = futures_to_combinations[future]
+                            
+                            # Remove from pending, add to completed
+                            if (month, country) in pending_futures:
+                                del pending_futures[(month, country)]
+                            completed_futures[(month, country)] = future
+                            
+                            try:
+                                if is_shutdown_requested():
+                                    continue
+                                        
+                                success, rows = future.result()
+                                
+                                if success:
+                                    successful_combinations += 1
+                                    total_rows += rows
+                                else:
+                                    failed_combinations += 1
+                                    failed_combination_pairs.add((month, country))
+                                
+                                logger.info(f"Combination {month}/{country}: {'Success' if success else 'Failed'}, Rows: {rows}")
+                            except Exception as e:
+                                failed_combinations += 1
+                                failed_combination_pairs.add((month, country))
+                                logger.error(f"Error processing {month}/{country}: {e}")
+                        else:
+                            logger.warning(f"Found completed future with no mapping to combination")
+                    
+                    # Check for shutdown
+                    if is_shutdown_requested():
+                        logger.warning("Shutdown requested, cancelling pending jobs")
+                        for future in pending_futures.values():
+                            if not future.done():
+                                future.cancel()
+                        break
+                        
+                    # If no futures processed, avoid tight loop
+                    if not newly_done:
+                        time.sleep(0.1)
+                        
+                except Exception as loop_error:
+                    logger.error(f"Error in futures processing loop: {loop_error}")
+                    time.sleep(1)  # Avoid high CPU if error occurs repeatedly
+        
+        # Record worker scaling history
+        scaling_history = worker_scaler.get_adjustment_history()
+        if scaling_history:
+            logger.info(f"Worker scaling adjustments: {len(scaling_history)}")
+        
+        return successful_combinations, failed_combinations, total_rows, failed_combination_pairs
+    finally:
+        # Record metrics
+        metrics.stop_timer("process_all_combinations")
+        metrics.record_value("successful_combinations", successful_combinations)
+        metrics.record_value("failed_combinations", failed_combinations)
+        metrics.record_value("total_rows_processed", total_rows)
 
 def process_month_range(bq_ops, start_month, end_month, parallel=True, request_id=None):
     """
@@ -439,234 +692,3 @@ def process_month_range(bq_ops, start_month, end_month, parallel=True, request_i
         metrics.record_value("months_processed_successfully", successful_months)
         metrics.record_value("months_processed_with_failure", failed_months)
         metrics.record_value("total_rows_processed", total_rows)
-
-def process_all_country_month_combinations(bq_ops, months, countries, request_id):
-    """
-    Process all country/month combinations with adaptive worker scaling.
-    
-    Args:
-        bq_ops (BigQueryOperations): BigQuery operations instance
-        months (List[date]): Months to process
-        countries (List[str]): Countries to process
-        request_id (str): Unique request identifier
-    
-    Returns:
-        Tuple[int, int, int, Set[Tuple[date, str]]]: 
-        - Successful combinations count
-        - Failed combinations count
-        - Total rows processed
-        - Set of failed (month, country) pairs
-    """
-    logger.info(f"Processing {len(months)} months × {len(countries)} countries in parallel")
-    
-    # Generate all combinations
-    combinations = [(month, country) for month in months for country in countries]
-    total_combinations = len(combinations)
-    
-    # Record total work
-    metrics.record_value("total_combinations", total_combinations)
-    
-    # Start timer for whole batch
-    metrics.start_timer("process_all_combinations")
-    
-    # Initialize worker scaler
-    worker_scaler = AdaptiveWorkerScaler(bq_ops.config)
-    
-    # Initialize tracking variables
-    successful_combinations = 0
-    failed_combinations = 0
-    failed_combination_pairs = set()
-    total_rows = 0
-    
-    # Track jobs
-    pending_futures = {}
-    completed_futures = {}
-    
-    try:
-        # Start with dynamic worker count
-        initial_workers = worker_scaler.get_worker_count()
-        logger.info(f"Starting with {initial_workers} workers for {total_combinations} combinations")
-        
-        # Create a dynamic worker pool with adaptive semaphore
-        max_possible_workers = bq_ops.config.get("MAX_WORKERS", 8)
-        worker_semaphore = AdaptiveSemaphore(initial_workers)
-        
-        # Create a fixed-size thread pool with the maximum possible workers
-        with ThreadPoolExecutor(max_workers=max_possible_workers) as executor:
-            def submit_with_semaphore(fn, *args, **kwargs):
-                """Submit a task that acquires and releases the worker semaphore."""
-                try:
-                    # Use a timeout to prevent potential deadlocks
-                    acquired = worker_semaphore.acquire(timeout=60)
-                    if not acquired:
-                        logger.warning("Failed to acquire worker semaphore after timeout")
-                        return None
-                        
-                    future = executor.submit(fn, *args, **kwargs)
-                    # Add callback to release semaphore when done
-                    future.add_done_callback(lambda f: worker_semaphore.release())
-                    return future
-                except Exception as e:
-                    # Important: If we fail after acquiring, make sure to release
-                    if 'acquired' in locals() and acquired:
-                        worker_semaphore.release()
-                    logger.error(f"Error submitting task: {e}")
-                    return None
-            
-            # Submit initial batch of jobs
-            for idx, (month, country) in enumerate(combinations):
-                if is_shutdown_requested():
-                    logger.warning("Shutdown requested, stopping submissions")
-                    break
-                    
-                combo_id = f"{request_id}_{month.strftime('%Y%m')}_{country}"
-                
-                # Submit task with semaphore control
-                future = submit_with_semaphore(
-                    process_month_for_country, bq_ops, month, country, combo_id
-                )
-                
-                if future:
-                    pending_futures[(month, country)] = future
-                else:
-                    failed_combinations += 1
-                    failed_combination_pairs.add((month, country))
-                    logger.error(f"Failed to submit task for {month}/{country}")
-            
-            # Keep track of completed futures
-            done_futures = set()
-            
-            # Process results as they complete
-            while pending_futures:
-                try:
-                    # Check if we need to adjust worker count
-                    new_worker_count = worker_scaler.get_worker_count()
-                    
-                    # Update semaphore count if worker count changed
-                    if new_worker_count != worker_semaphore.current_value:
-                        worker_semaphore.adjust_value(new_worker_count)
-                    
-                    # Check for completed futures with a timeout to prevent hanging
-                    try:
-                        # Wait for a batch of futures to complete
-                        newly_done, _ = wait_for_futures(
-                            list(pending_futures.values()), 
-                            timeout=60,
-                            done_set=done_futures
-                        )
-                    except Exception as e:
-                        logger.warning(f"Timeout waiting for futures to complete: {e}")
-                        # Check for any completed futures without waiting
-                        newly_done = {f for f in pending_futures.values() if f.done()} - done_futures
-                        if not newly_done:
-                            time.sleep(5)  # Avoid high CPU if stuck
-                            continue
-                    
-                    done_futures.update(newly_done)
-                    
-                    # Process completed futures
-                    for future in newly_done:
-                        # Find which combination this future belongs to
-                        for combo, f in list(pending_futures.items()):
-                            if f == future:
-                                month, country = combo
-                                del pending_futures[combo]
-                                completed_futures[combo] = future
-                                
-                                try:
-                                    if is_shutdown_requested():
-                                        continue
-                                            
-                                    success, rows = future.result()
-                                    
-                                    if success:
-                                        successful_combinations += 1
-                                        total_rows += rows
-                                    else:
-                                        failed_combinations += 1
-                                        failed_combination_pairs.add((month, country))
-                                    
-                                    logger.info(f"Combination {month}/{country}: {'Success' if success else 'Failed'}, Rows: {rows}")
-                                except Exception as e:
-                                    failed_combinations += 1
-                                    failed_combination_pairs.add((month, country))
-                                    logger.error(f"Error processing {month}/{country}: {e}")
-                                
-                                break
-                    
-                    # Check for shutdown
-                    if is_shutdown_requested():
-                        logger.warning("Shutdown requested, cancelling pending jobs")
-                        for future in pending_futures.values():
-                            if not future.done():
-                                future.cancel()
-                        break
-                        
-                    # If no futures processed, avoid tight loop
-                    if not newly_done:
-                        time.sleep(0.1)
-                        
-                except Exception as loop_error:
-                    logger.error(f"Error in futures processing loop: {loop_error}")
-                    time.sleep(1)  # Avoid high CPU if error occurs repeatedly
-        
-        # Record worker scaling history
-        scaling_history = worker_scaler.get_adjustment_history()
-        if scaling_history:
-            logger.info(f"Worker scaling adjustments: {len(scaling_history)}")
-        
-        return successful_combinations, failed_combinations, total_rows, failed_combination_pairs
-    finally:
-        # Record metrics
-        metrics.stop_timer("process_all_combinations")
-        metrics.record_value("successful_combinations", successful_combinations)
-        metrics.record_value("failed_combinations", failed_combinations)
-        metrics.record_value("total_rows_processed", total_rows)
-
-def wait_for_futures(futures, timeout=None, done_set=None):
-    """
-    Safer alternative to as_completed that works with timeouts.
-    
-    Args:
-        futures: List of futures to wait for
-        timeout: Maximum time to wait in seconds
-        done_set: Set of already processed futures to exclude
-        
-    Returns:
-        Tuple[Set, Set]: Newly completed futures and remaining futures
-    """
-    if done_set is None:
-        done_set = set()
-    
-    end_time = None if timeout is None else time.time() + timeout
-    new_done = set()
-    remaining = set(futures)
-    
-    # Remove already processed futures
-    remaining -= done_set
-    
-    # Early return if nothing to wait for
-    if not remaining:
-        return new_done, remaining
-    
-    # Wait until timeout or all futures complete
-    while remaining:
-        # Check if timeout expired
-        if end_time is not None and time.time() >= end_time:
-            break
-            
-        # Check each future
-        for future in list(remaining):
-            if future.done():
-                new_done.add(future)
-                remaining.remove(future)
-                
-        # If nothing completed yet, sleep briefly
-        if not new_done and remaining:
-            time.sleep(0.1)
-            
-        # If all done, break early
-        if not remaining:
-            break
-            
-    return new_done, remaining

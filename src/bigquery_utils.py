@@ -2,6 +2,8 @@ import time
 import threading
 import random
 import uuid
+import os
+import concurrent.futures
 from typing import Dict, Any, Optional, Union, List, Tuple, Set
 from contextlib import contextmanager
 
@@ -221,35 +223,61 @@ class BigQueryConnectionPool:
     
     def release_client(self, client: bigquery.Client) -> None:
         """
-        Return a client to the connection pool.
+        Return a client to the connection pool with improved error handling.
         
         Args:
             client (bigquery.Client): Client to return to the pool
         """
+        if client is None:
+            logger.warning("Attempted to release a null client - ignoring")
+            return
+            
         try:
             with self.lock:
-                if client in self.in_use_clients:
-                    self.in_use_clients.remove(client)
+                # Check if this is a known client
+                if client not in self.in_use_clients:
+                    logger.warning("Attempted to release an unknown client - ignoring")
+                    return
                     
-                    if self.shutdown_requested:
-                        # During shutdown, close immediately
-                        try:
-                            client.close()
-                        except Exception as e:
-                            logger.warning(f"Error closing client during shutdown: {e}")
+                # Remove from in-use set
+                self.in_use_clients.remove(client)
+                
+                # Handle client based on pool state
+                if self.shutdown_requested:
+                    # During shutdown, close immediately
+                    try:
+                        client.close()
+                        logger.debug("Closed client during shutdown")
+                    except Exception as e:
+                        logger.warning(f"Error closing client during shutdown: {e}")
+                    
+                    # Signal shutdown completion if no active connections
+                    if not self.in_use_clients:
+                        logger.info("All clients returned during shutdown, setting shutdown event")
+                        self.shutdown_event.set()
+                else:
+                    # During normal operation, check if client is still usable
+                    try:
+                        # Simple health check query
+                        client.query("SELECT 1").result(timeout=5)
                         
-                        # Signal shutdown completion if no active connections
-                        if not self.in_use_clients:
-                            self.shutdown_event.set()
-                    elif len(self.available_clients) < self.pool_size:
-                        # Return to pool during normal operation
-                        self.available_clients.append(client)
-                    else:
-                        # Close excess connections
+                        # Client is healthy, return to pool if we have space
+                        if len(self.available_clients) < self.pool_size:
+                            self.available_clients.append(client)
+                            logger.debug("Returned healthy client to pool")
+                        else:
+                            # Close excess connections
+                            client.close()
+                            logger.debug("Closed excess client (pool full)")
+                    except Exception as e:
+                        # Client appears unhealthy, close it instead of returning to pool
+                        logger.warning(f"Detected unhealthy client, closing instead of returning to pool: {e}")
                         try:
                             client.close()
-                        except Exception as e:
-                            logger.warning(f"Error closing excess client: {e}")
+                        except Exception as close_error:
+                            logger.warning(f"Error closing unhealthy client: {close_error}")
+        except Exception as e:
+            logger.error(f"Unexpected error in release_client: {e}")
         finally:
             # Always release the semaphore
             self.semaphore.release()
@@ -653,7 +681,8 @@ class BigQueryOperations:
             Query results or job object
             
         Raises:
-            Exception: For query execution failures
+            TimeoutError: When query execution times out
+            Exception: For other query execution failures
         """
         if timeout is None:
             timeout = self.config.get("QUERY_TIMEOUT", 3600)
@@ -661,7 +690,7 @@ class BigQueryOperations:
         # Check if we're approaching job timeout
         adjusted_timeout = self._check_timeout(timeout)
         if adjusted_timeout is False:  # We're too close to timeout
-            raise Exception("Job timeout approaching, refusing operation")
+            raise TimeoutError("Job timeout approaching, refusing operation")
         elif adjusted_timeout is not None:
             timeout = adjusted_timeout
         
@@ -692,7 +721,8 @@ class BigQueryOperations:
         # Label queries for monitoring
         job_config.labels = {
             "service": self.config.get("SERVICE_NAME", "etl-job"),
-            "job_type": "data_processing"
+            "job_type": "data_processing",
+            "job_id": os.environ.get("CLOUD_RUN_JOB_EXECUTION", os.environ.get("JOB_ID", "unknown"))
         }
         
         # Start tracking execution time
@@ -704,8 +734,8 @@ class BigQueryOperations:
             # Execute with retries
             retry_count = 0
             max_retries = self.config.get("MAX_RETRY_ATTEMPTS", 3)
-            base_delay = 1.0
-            max_delay = 60.0
+            base_delay = self.config.get("RETRY_INITIAL_DELAY_MS", 1000) / 1000.0  # Convert to seconds
+            max_delay = self.config.get("RETRY_MAX_DELAY_MS", 60000) / 1000.0  # Convert to seconds
             
             while True:
                 try:
@@ -720,7 +750,7 @@ class BigQueryOperations:
                     
                     # Record bytes processed if available
                     if hasattr(query_job, 'total_bytes_processed'):
-                        metrics.record_value("bytes_processed", query_job.total_bytes_processed)
+                        metrics.record_value("bytes_processed", query_job.total_bytes_processed or 0)
                     
                     # Profile the query for performance analysis
                     self.query_profiler.profile_query(query, params, query_job, execution_time)
@@ -729,6 +759,14 @@ class BigQueryOperations:
                     if return_job:
                         return query_job
                     return result
+                    
+                except concurrent.futures.TimeoutError as e:
+                    # Specific handling for timeout errors
+                    metrics.stop_timer("query_execution")
+                    metrics.increment_counter("query_timeout_errors")
+                    self.circuit_breaker.record_failure()
+                    logger.error(f"Query execution timed out after {timeout}s: {e}")
+                    raise TimeoutError(f"Query execution timed out after {timeout}s") from e
                     
                 except Exception as e:
                     # Check if this exception is retryable

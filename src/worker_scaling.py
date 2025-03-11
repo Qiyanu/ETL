@@ -197,6 +197,9 @@ class AdaptiveWorkerScaler:
         self.lock = threading.Lock()
         self.worker_history: List[Dict[str, Any]] = []
         
+        # Maximum size for worker history (to prevent unbounded growth)
+        self.max_history_size = config.get("MAX_HISTORY_SIZE", 100)
+        
         # Scaling trend trackers
         self.consecutive_high_cpu = 0
         self.consecutive_low_cpu = 0
@@ -438,8 +441,12 @@ class AdaptiveWorkerScaler:
             'memory_available_gb': metrics['memory_available_gb'],
         }
         
-        # Add to adjustment history
-        self.worker_history.append(adjustment)
+        # Add to adjustment history with size limit
+        with self.lock:
+            self.worker_history.append(adjustment)
+            # Trim history if it exceeds the limit
+            if len(self.worker_history) > self.max_history_size:
+                self.worker_history = self.worker_history[-self.max_history_size:]
         
         # Log memory allocation details
         total_memory_gb = psutil.virtual_memory().total / (1024**3)

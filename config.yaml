@@ -12,32 +12,57 @@ tables:
 
 # Processing Configuration
 processing:
-  # Query timeout in seconds (new explicit key)
+  # Query timeout in seconds
   query_timeout: 3600
   
-  # Maximum number of concurrent workers (new explicit key)
+  # Maximum number of concurrent workers
   max_workers: 8
   
   # BigQuery geographic location
   location: "EU"
-
-# Filtering Configuration
-filters:
-  # Countries to process (new explicit key)
-  allowed_countries:
-    - "ITA"
-    - "ESP"
   
+  # Resource usage limits
+  resource_limits:
+    target_cpu_usage: 0.8
+    cpu_scale_up_threshold: 0.9
+    cpu_scale_down_threshold: 0.6
+    target_memory_usage: 0.7
+    memory_scale_up_threshold: 0.9
+    memory_scale_down_threshold: 0.55
+    memory_limit_threshold: 0.9
+
+# Countries Configuration
+countries:
   # Country code mappings
-  country_mapping:
+  mapping:
     "ITA": "IT"
     "ESP": "SP"
+    # Add more country mappings here as needed
   
-  # Excluded chain types
-  excluded_chain_types:
-    - "SUPECO"
-    - "Galerie"
-    - "AUTRES"
+  # Enabled countries
+  enabled:
+    - "ITA"
+    - "ESP"
+    # Add more country codes here as needed
+  
+  # Country-specific filters
+  filters:
+    # Italy-specific filters
+    ITA:
+      excluded_chain_types:
+        - "SUPECO"
+        - "Galerie"
+        - "AUTRES"
+      excluded_site_types: []
+    
+    # Spain-specific filters
+    ESP:
+      excluded_business_brands:
+        - "supeco"
+      excluded_ecm_combinations:
+        - business_brand: "alcampo"
+          activity_type: "ECM"
+      excluded_chain_types: []
 
 # Job Configuration
 job:

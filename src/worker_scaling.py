@@ -172,15 +172,15 @@ class AdaptiveWorkerScaler:
         self.initial_workers = config.get("INITIAL_WORKERS", min(4, self.max_workers))
         
         # CPU utilization targets
-        self.target_cpu_usage = config.get("TARGET_CPU_USAGE", 0.7)  # 70%
-        self.cpu_scale_up_threshold = config.get("CPU_SCALE_UP_THRESHOLD", 0.8)  # 80%
+        self.target_cpu_usage = config.get("TARGET_CPU_USAGE", 0.8)  # 80%
+        self.cpu_scale_up_threshold = config.get("CPU_SCALE_UP_THRESHOLD", 0.9)  # 90%
         self.cpu_scale_down_threshold = config.get("CPU_SCALE_DOWN_THRESHOLD", 0.5)  # 50%
         
         # Memory utilization targets
-        self.target_memory_usage = config.get("TARGET_MEMORY_USAGE", 0.6)  # 60%
-        self.memory_scale_up_threshold = config.get("MEMORY_SCALE_UP_THRESHOLD", 0.75)  # 75%
-        self.memory_scale_down_threshold = config.get("MEMORY_SCALE_DOWN_THRESHOLD", 0.45)  # 45%
-        self.memory_limit_threshold = config.get("MEMORY_LIMIT_THRESHOLD", 0.85)  # 85%
+        self.target_memory_usage = config.get("TARGET_MEMORY_USAGE", 0.7)  # 70%
+        self.memory_scale_up_threshold = config.get("MEMORY_SCALE_UP_THRESHOLD", 0.9)  # 90%
+        self.memory_scale_down_threshold = config.get("MEMORY_SCALE_DOWN_THRESHOLD", 0.55)  # 55%
+        self.memory_limit_threshold = config.get("MEMORY_LIMIT_THRESHOLD", 0.9)  # 90%
         
         # Memory reservation per worker - add safety margin
         raw_memory_per_worker = config.get("MEMORY_PER_WORKER_MB", 512)  # 512MB per worker

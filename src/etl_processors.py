@@ -88,7 +88,7 @@ def create_temp_table_for_month(bq_ops, the_month, temp_table_id, country, reque
         # Create the appropriate query based on the country
         query_generator = QUERY_GENERATORS.get(country)
         if not query_generator:
-            raise ValueError(f"Unsupported country: {country}")
+            raise ValueError(f"Unsupported country: {country}. Available countries: {', '.join(QUERY_GENERATORS.keys())}")
         
         # Get the query and parameters
         result = query_generator(bq_ops, temp_table_id)
@@ -104,10 +104,14 @@ def create_temp_table_for_month(bq_ops, the_month, temp_table_id, country, reque
                 bigquery.ScalarQueryParameter("theMonth", "DATE", the_month),
             ]
         
-        # Update the theMonth parameter with the actual value
+        # Update the theMonth parameter with the actual value if needed
         for param in params:
             if param.name == "theMonth" and param.value is None:
                 param._value = the_month  # Set the actual value
+        
+        # Log the country-specific filters being used
+        country_filters = bq_ops.config.get(f"COUNTRIES_FILTERS_{country}", {})
+        logger.info(f"Processing {country} with filters: {country_filters}")
         
         # Execute query to create temporary table
         bq_ops.execute_query(create_temp_table_query, params)

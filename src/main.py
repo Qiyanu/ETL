@@ -65,10 +65,10 @@ def main():
         
         try:
             # Determine date range to process
-            if config.get("START_MONTH") and config.get("END_MONTH"):
+            if config.get("JOB_START_MONTH") and config.get("JOB_END_MONTH"):
                 # Use explicitly configured start and end months
-                start_month = datetime.strptime(config["START_MONTH"], '%Y-%m-%d').date()
-                end_month = datetime.strptime(config["END_MONTH"], '%Y-%m-%d').date()
+                start_month = datetime.strptime(config["JOB_START_MONTH"], '%Y-%m-%d').date()
+                end_month = datetime.strptime(config["JOB_END_MONTH"], '%Y-%m-%d').date()
             elif config.get("JOB_LAST_N_MONTHS"):
                 # Process the last N months
                 last_n_months = int(config["JOB_LAST_N_MONTHS"])
@@ -88,9 +88,21 @@ def main():
             if (end_month.year - start_month.year) * 12 + (end_month.month - start_month.month) > 36:
                 raise ValueError(f"Date range too large: {start_month} to {end_month} spans more than 36 months")
             
+            # Check for enabled countries from the new config structure
+            enabled_countries = config.get("ALLOWED_COUNTRIES") or []
+            
+            # Validate that we have query generators for all enabled countries
+            from src.query_templates import QUERY_GENERATORS
+            unsupported_countries = [country for country in enabled_countries if country not in QUERY_GENERATORS]
+            if unsupported_countries:
+                raise ValueError(
+                    f"Unsupported countries in configuration: {', '.join(unsupported_countries)}. "
+                    f"Available countries: {', '.join(QUERY_GENERATORS.keys())}"
+                )
+            
             # Log parameters
-            logger.info(f"Processing from {start_month} to {end_month}, parallel={config.get('PARALLEL', True)}")
-            logger.info(f"Countries to process: {', '.join(config.get('ALLOWED_COUNTRIES', []))}")
+            logger.info(f"Processing from {start_month} to {end_month}, parallel={config.get('JOB_PARALLEL', True)}")
+            logger.info(f"Countries to process: {', '.join(enabled_countries)}")
             
             # Ensure destination table exists with optimal schema
             create_customer_data_table_if_not_exists(bq_ops)
@@ -100,7 +112,7 @@ def main():
                 bq_ops, 
                 start_month, 
                 end_month, 
-                config.get("PARALLEL", True), 
+                config.get("JOB_PARALLEL", True), 
                 request_id
             )
             
@@ -114,7 +126,7 @@ def main():
                 "job_id": job_id,
                 "start_month": start_month.isoformat(),
                 "end_month": end_month.isoformat(),
-                "countries": config.get("ALLOWED_COUNTRIES", []),
+                "countries": enabled_countries,
                 "successful_months": successful_months,
                 "failed_months": failed_months,
                 "processing_time_seconds": round(elapsed, 2),

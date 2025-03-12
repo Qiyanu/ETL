@@ -398,7 +398,6 @@ class AdaptiveWorkerScaler:
         
         for _ in range(self.sample_count):
             metrics_samples.append(self.resource_monitor.get_system_metrics())
-            print(metrics_samples)
             time.sleep(self.sample_interval)
         
         # Average the metrics
@@ -409,7 +408,7 @@ class AdaptiveWorkerScaler:
         final_metrics = metrics_samples[-1].copy()
         final_metrics['cpu_percent'] = sum(cpu_samples) / len(cpu_samples)
         final_metrics['memory_percent'] = sum(memory_samples) / len(memory_samples)
-        print(final_metrics)
+
         return final_metrics
     
     def _record_adjustment(

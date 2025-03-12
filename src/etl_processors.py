@@ -302,7 +302,10 @@ def process_month_for_country(bq_ops, the_month, country, request_id):
     logger.info(f"Processing month {the_month} for country {country}")
     
     metrics.start_timer(f"process_month_{the_month.strftime('%Y%m')}_{country}")
-    temp_table_id = f"{bq_ops.config['DEST_PROJECT']}.{bq_ops.config['DEST_DATASET']}.temp_data_{country}_{the_month.strftime('%Y%m')}_{request_id}"
+    
+    # Add a unique UUID component to prevent collisions
+    unique_id = str(uuid.uuid4())[:8]
+    temp_table_id = f"{bq_ops.config['DEST_PROJECT']}.{bq_ops.config['DEST_DATASET']}.temp_data_{country}_{the_month.strftime('%Y%m')}_{request_id}_{unique_id}"
     
     try:
         # Create a temp table with the aggregated data for this country

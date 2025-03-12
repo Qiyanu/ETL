@@ -16,6 +16,7 @@ from src.etl_processors import (
     process_month_range
 )
 from src.shutdown_utils import is_shutdown_requested, request_shutdown, initialize_shutdown_handler
+from src.cleanup_utils import cleanup_orphaned_temp_tables
 
 def main():
     """
@@ -64,6 +65,18 @@ def main():
         logger.info(f"Starting ETL job with ID: {job_id}")
         
         try:
+            # First, clean up any orphaned temporary tables from previous runs
+            try:
+                # Configure cleanup age from config or use default (24 hours)
+                cleanup_age_hours = config.get("TEMP_TABLE_CLEANUP_AGE_HOURS", 24)
+                deleted_count, deleted_tables = cleanup_orphaned_temp_tables(bq_ops, max_age_hours=cleanup_age_hours)
+                
+                if deleted_count > 0:
+                    logger.info(f"Cleaned up {deleted_count} orphaned temporary tables")
+                    logger.debug(f"Deleted tables: {', '.join(deleted_tables)}")
+            except Exception as cleanup_error:
+                logger.warning(f"Orphaned table cleanup failed: {cleanup_error}")
+            
             # Determine date range to process
             if config.get("JOB_START_MONTH") and config.get("JOB_END_MONTH"):
                 # Use explicitly configured start and end months
@@ -137,6 +150,17 @@ def main():
             logger.info(f"Processing completed in {elapsed:.2f} seconds: {successful_months} months successful, {failed_months} months failed")
             logger.info(f"Job summary: {json.dumps(summary)}")
             
+            # Run a final cleanup after processing to catch any tables that were missed
+            try:
+                # Use a shorter timeout for orphaned tables created during this run
+                cleanup_age_hours = config.get("TEMP_TABLE_CLEANUP_AGE_HOURS", 24)
+                recent_cleanup_hours = max(4, cleanup_age_hours/6)  # Default to 4 hours minimum
+                deleted_count, _ = cleanup_orphaned_temp_tables(bq_ops, max_age_hours=recent_cleanup_hours)
+                if deleted_count > 0:
+                    logger.info(f"Cleaned up {deleted_count} temporary tables from current run")
+            except Exception as cleanup_error:
+                logger.warning(f"Final table cleanup failed: {cleanup_error}")
+            
             # Clean up resources with graceful shutdown
             shutdown_timeout = config.get("CONNECTION_POOL_SHUTDOWN_TIMEOUT", 60)
             logger.info(f"Starting connection pool cleanup with {shutdown_timeout}s timeout")
@@ -168,6 +192,16 @@ def main():
                 "metrics": metrics_summary
             }
             
+            # Try to clean up any temporary tables even if the job failed
+            try:
+                if bq_ops:
+                    # Use a shorter timeout to catch tables from this run
+                    deleted_count, _ = cleanup_orphaned_temp_tables(bq_ops, max_age_hours=6)
+                    if deleted_count > 0:
+                        logger.info(f"Cleaned up {deleted_count} temporary tables after job failure")
+            except Exception as cleanup_error:
+                logger.warning(f"Cleanup after failure failed: {cleanup_error}")
+            
             # Clean up resources if available with graceful shutdown
             if bq_ops and hasattr(bq_ops, 'connection_pool'):
                 shutdown_timeout = config.get("CONNECTION_POOL_SHUTDOWN_TIMEOUT", 60)
@@ -181,6 +215,15 @@ def main():
         logger.warning("Keyboard interrupt received")
         # Request shutdown to allow graceful termination
         request_shutdown()
+        
+        # Try to clean up any temporary tables
+        try:
+            if bq_ops:
+                deleted_count, _ = cleanup_orphaned_temp_tables(bq_ops, max_age_hours=6)
+                if deleted_count > 0:
+                    logger.info(f"Cleaned up {deleted_count} temporary tables after interruption")
+        except Exception:
+            pass
         
         # Minimal cleanup in case of keyboard interrupt
         if bq_ops and hasattr(bq_ops, 'connection_pool'):
@@ -196,6 +239,13 @@ def main():
         # Handle unexpected top-level exceptions
         logger.critical(f"Critical error: {e}")
         logger.critical(f"Traceback: {traceback.format_exc()}")
+        
+        # Try to clean up temporary tables
+        try:
+            if bq_ops:
+                cleanup_orphaned_temp_tables(bq_ops, max_age_hours=6)
+        except Exception:
+            pass
         
         # Try to clean up if possible
         if bq_ops and hasattr(bq_ops, 'connection_pool'):

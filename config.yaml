@@ -31,6 +31,40 @@ processing:
     memory_scale_down_threshold: 0.55
     memory_limit_threshold: 0.9
 
+# Temporary Tables Configuration
+temp_tables:
+  # Hours before temporary tables are considered orphaned and cleaned up
+  cleanup_age_hours: 24
+  # Hours before temporary tables expire (BigQuery table expiration)
+  expiration_hours: 24
+  # Whether to add descriptions to temporary tables
+  add_descriptions: true
+
+# Query Profiling Configuration
+query_profiling:
+  # Maximum number of query profiles to store in memory
+  max_profiles: 100
+  # Enable detailed query plan analysis
+  enable_query_plan_analysis: true
+  # Threshold in seconds for slow query detection (7 minutes default)
+  slow_query_threshold_seconds: 420
+  # Threshold in bytes for large query detection (20GB default)
+  large_query_threshold_bytes: 21474836480
+
+# Connection Pool Configuration
+connection_pool:
+  # Timeout in seconds for graceful connection pool shutdown
+  shutdown_timeout: 60
+  # Maximum connections to keep in pool
+  max_connections: 10
+  # Maximum total connections allowed
+  max_total_connections: 20
+
+# Metrics Configuration
+metrics:
+  # Maximum number of values to store per metric
+  max_history_per_metric: 1000
+
 # Countries Configuration
 countries:
   # Country code mappings

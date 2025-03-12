@@ -71,8 +71,6 @@ def _sanitize_table_reference(table_id: str) -> str:
     
     return '.'.join(parts)
 
-# Updates to src/config.py in the validate_config function:
-
 def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """
     Validate the ETL configuration for required values and proper types.
@@ -148,31 +146,39 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
             if isinstance(country, str) and country not in country_mapping:
                 errors.append(f"Missing country mapping for {country}")
     
-    # (Rest of validation function remains the same)
-    return len(errors) == 0, errors
+    # Validate temp_tables settings if present
+    temp_tables = _get_nested_config_value(config, "temp_tables")
+    if temp_tables is not None:
+        if not isinstance(temp_tables, dict):
+            errors.append(f"temp_tables must be a dictionary, got: {type(temp_tables).__name__}")
+        else:
+            if "cleanup_age_hours" in temp_tables and not isinstance(temp_tables["cleanup_age_hours"], (int, float)):
+                errors.append(f"temp_tables.cleanup_age_hours must be a number, got: {type(temp_tables['cleanup_age_hours']).__name__}")
+            if "expiration_hours" in temp_tables and not isinstance(temp_tables["expiration_hours"], (int, float)):
+                errors.append(f"temp_tables.expiration_hours must be a number, got: {type(temp_tables['expiration_hours']).__name__}")
     
-# Add the following to the load_config function (in the flat_config mapping section):
-
-    # Map new country-related config
-    if "COUNTRIES_ENABLED" in flat_config:
-        flat_config["ALLOWED_COUNTRIES"] = flat_config["COUNTRIES_ENABLED"]
-    if "COUNTRIES_MAPPING" in flat_config:
-        flat_config["COUNTRY_MAPPING"] = flat_config["COUNTRIES_MAPPING"]
-        
-    # Map country-specific filters - create dedicated sections for each country
-    for country in flat_config.get("COUNTRIES_ENABLED", []):
-        country_filter_prefix = f"COUNTRIES_FILTERS_{country}"
-        # Check if this section exists in the flat config
-        if f"{country_filter_prefix}" in flat_config:
-            flat_config[country_filter_prefix] = flat_config[f"{country_filter_prefix}"]
+    # Validate connection_pool settings if present
+    conn_pool = _get_nested_config_value(config, "connection_pool")
+    if conn_pool is not None:
+        if not isinstance(conn_pool, dict):
+            errors.append(f"connection_pool must be a dictionary, got: {type(conn_pool).__name__}")
+        else:
+            if "shutdown_timeout" in conn_pool and not isinstance(conn_pool["shutdown_timeout"], int):
+                errors.append(f"connection_pool.shutdown_timeout must be an integer, got: {type(conn_pool['shutdown_timeout']).__name__}")
+            if "max_connections" in conn_pool and not isinstance(conn_pool["max_connections"], int):
+                errors.append(f"connection_pool.max_connections must be an integer, got: {type(conn_pool['max_connections']).__name__}")
             
-    # Map resource usage limits if defined
-    if "PROCESSING_RESOURCE_LIMITS_CPU_SCALE_UP_THRESHOLD" in flat_config:
-        flat_config["CPU_SCALE_UP_THRESHOLD"] = flat_config["PROCESSING_RESOURCE_LIMITS_CPU_SCALE_UP_THRESHOLD"]
-    if "PROCESSING_RESOURCE_LIMITS_MEMORY_SCALE_UP_THRESHOLD" in flat_config:
-        flat_config["MEMORY_SCALE_UP_THRESHOLD"] = flat_config["PROCESSING_RESOURCE_LIMITS_MEMORY_SCALE_UP_THRESHOLD"]
-    if "PROCESSING_RESOURCE_LIMITS_MEMORY_LIMIT_THRESHOLD" in flat_config:
-        flat_config["MEMORY_LIMIT_THRESHOLD"] = flat_config["PROCESSING_RESOURCE_LIMITS_MEMORY_LIMIT_THRESHOLD"]
+    # Validate query_profiling settings if present
+    query_profiling = _get_nested_config_value(config, "query_profiling")
+    if query_profiling is not None:
+        if not isinstance(query_profiling, dict):
+            errors.append(f"query_profiling must be a dictionary, got: {type(query_profiling).__name__}")
+        else:
+            if "max_profiles" in query_profiling and not isinstance(query_profiling["max_profiles"], int):
+                errors.append(f"query_profiling.max_profiles must be an integer, got: {type(query_profiling['max_profiles']).__name__}")
+    
+    # Return validation result
+    return len(errors) == 0, errors
 
 def _get_nested_config_value(config, key_path):
     """
@@ -419,11 +425,45 @@ def load_config(config_file=None) -> Dict[str, Any]:
         flat_config["CIRCUIT_BREAKER_TIMEOUT"] = flat_config["RESILIENCE_CIRCUIT_BREAKER_TIMEOUT"]
     if "RESILIENCE_MAX_RETRY_ATTEMPTS" in flat_config:
         flat_config["MAX_RETRY_ATTEMPTS"] = flat_config["RESILIENCE_MAX_RETRY_ATTEMPTS"]
+    if "COUNTRIES_ENABLED" in flat_config:
+        flat_config["ALLOWED_COUNTRIES"] = flat_config["COUNTRIES_ENABLED"]
+    if "COUNTRIES_MAPPING" in flat_config:
+        flat_config["COUNTRY_MAPPING"] = flat_config["COUNTRIES_MAPPING"]
     if "FILTERS_COUNTRY_MAPPING" in flat_config:
         flat_config["COUNTRY_MAPPING"] = flat_config["FILTERS_COUNTRY_MAPPING"]
     if "FILTERS_EXCLUDED_CHAIN_TYPES" in flat_config:
         flat_config["EXCLUDED_CHAIN_TYPES"] = flat_config["FILTERS_EXCLUDED_CHAIN_TYPES"]
     
+    # Map temporary table settings
+    if "TEMP_TABLES_CLEANUP_AGE_HOURS" in flat_config:
+        flat_config["TEMP_TABLE_CLEANUP_AGE_HOURS"] = flat_config["TEMP_TABLES_CLEANUP_AGE_HOURS"]
+    if "TEMP_TABLES_EXPIRATION_HOURS" in flat_config:
+        flat_config["TEMP_TABLE_EXPIRATION_HOURS"] = flat_config["TEMP_TABLES_EXPIRATION_HOURS"]
+    if "TEMP_TABLES_ADD_DESCRIPTIONS" in flat_config:
+        flat_config["TEMP_TABLE_ADD_DESCRIPTIONS"] = flat_config["TEMP_TABLES_ADD_DESCRIPTIONS"]
+
+    # Map query profiling settings
+    if "QUERY_PROFILING_MAX_PROFILES" in flat_config:
+        flat_config["MAX_QUERY_PROFILES"] = flat_config["QUERY_PROFILING_MAX_PROFILES"]
+    if "QUERY_PROFILING_ENABLE_QUERY_PLAN_ANALYSIS" in flat_config:
+        flat_config["ENABLE_QUERY_PLAN_ANALYSIS"] = flat_config["QUERY_PROFILING_ENABLE_QUERY_PLAN_ANALYSIS"]
+    if "QUERY_PROFILING_SLOW_QUERY_THRESHOLD_SECONDS" in flat_config:
+        flat_config["SLOW_QUERY_THRESHOLD_SECONDS"] = flat_config["QUERY_PROFILING_SLOW_QUERY_THRESHOLD_SECONDS"]
+    if "QUERY_PROFILING_LARGE_QUERY_THRESHOLD_BYTES" in flat_config:
+        flat_config["LARGE_QUERY_THRESHOLD_BYTES"] = flat_config["QUERY_PROFILING_LARGE_QUERY_THRESHOLD_BYTES"]
+
+    # Map connection pool settings
+    if "CONNECTION_POOL_SHUTDOWN_TIMEOUT" in flat_config:
+        flat_config["CONNECTION_POOL_SHUTDOWN_TIMEOUT"] = flat_config["CONNECTION_POOL_SHUTDOWN_TIMEOUT"]
+    if "CONNECTION_POOL_MAX_CONNECTIONS" in flat_config:
+        flat_config["MAX_CONNECTIONS"] = flat_config["CONNECTION_POOL_MAX_CONNECTIONS"]
+    if "CONNECTION_POOL_MAX_TOTAL_CONNECTIONS" in flat_config:
+        flat_config["MAX_TOTAL_CONNECTIONS"] = flat_config["CONNECTION_POOL_MAX_TOTAL_CONNECTIONS"]
+
+    # Map metrics settings
+    if "METRICS_MAX_HISTORY_PER_METRIC" in flat_config:
+        flat_config["METRICS_MAX_HISTORY"] = flat_config["METRICS_MAX_HISTORY_PER_METRIC"]
+        
     # Special handling for country mapping (mapped differently in the flattening)
     if "FILTERS_COUNTRY_MAPPING_ITA" in flat_config and "FILTERS_COUNTRY_MAPPING_ESP" in flat_config:
         flat_config["COUNTRY_MAPPING"] = {

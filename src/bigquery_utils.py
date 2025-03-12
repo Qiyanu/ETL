@@ -107,6 +107,7 @@ class CircuitBreaker:
             # In HALF-OPEN state, allow only one test request
             if self.state == "HALF-OPEN":
                 if not self.half_open_test_in_progress:
+                    # Atomic check and set within the lock
                     self.half_open_test_in_progress = True
                     logger.info("Circuit breaker allowing test request in HALF-OPEN state")
                     return True
@@ -198,10 +199,12 @@ class BigQueryConnectionPool:
         if self.shutdown_requested:
             raise RuntimeError("Connection pool is shutting down, no new connections allowed")
         
-        # Acquire semaphore to control maximum concurrent connections
-        self.semaphore.acquire()
-        
+        acquired = False
         try:
+            # Acquire semaphore to control maximum concurrent connections
+            self.semaphore.acquire()
+            acquired = True
+            
             with self.lock:
                 self.checkout_count += 1
                 
@@ -233,11 +236,12 @@ class BigQueryConnectionPool:
                 
                 return client
         except Exception as e:
-            # Release semaphore on error
-            self.semaphore.release()
+            # Release semaphore on error but only if we acquired it
+            if acquired:
+                self.semaphore.release()
             logger.error(f"Error getting client from pool: {e}")
             raise
-    
+
     def release_client(self, client: bigquery.Client) -> None:
         """
         Return a client to the connection pool with improved error handling.
@@ -252,12 +256,13 @@ class BigQueryConnectionPool:
         try:
             with self.lock:
                 # Check if this is a known client
-                if client not in self.in_use_clients:
+                is_known_client = client in self.in_use_clients
+                if not is_known_client:
                     logger.warning("Attempted to release an unknown client - ignoring")
-                    return
-                    
-                # Remove from in-use set
-                self.in_use_clients.remove(client)
+                    # We don't return here to ensure semaphore is released regardless
+                else:
+                    # Remove from in-use set
+                    self.in_use_clients.remove(client)
                 
                 # Handle client based on pool state
                 if self.shutdown_requested:
@@ -272,7 +277,7 @@ class BigQueryConnectionPool:
                     if not self.in_use_clients:
                         logger.info("All clients returned during shutdown, setting shutdown event")
                         self.shutdown_event.set()
-                else:
+                elif is_known_client:  # Only handle if it was a known client
                     # During normal operation, check if client is still usable
                     try:
                         # Simple health check query with reduced timeout
@@ -380,7 +385,8 @@ class QueryProfiler:
         self.time_threshold_seconds = config.get("SLOW_QUERY_THRESHOLD_SECONDS", 420)  # 7 minutes
         self.size_threshold_bytes = config.get("LARGE_QUERY_THRESHOLD_BYTES", 20 * 1024 * 1024 * 1024)  # 20GB
         
-        # Profiling storage
+        # Profiling storage with maximum size limit to prevent unbounded growth
+        self.max_profiles = config.get("MAX_QUERY_PROFILES", 100)  # Default to storing 100 profiles
         self.profiles: List[Dict[str, Any]] = []
         self.lock = threading.Lock()
         
@@ -437,76 +443,20 @@ class QueryProfiler:
             except Exception as e:
                 logger.warning(f"Failed to extract query plan: {e}")
         
-        # Store the profile
+        # Store the profile with size limit
         with self.lock:
+            # Add the new profile
             self.profiles.append(profile)
+            
+            # Trim the profiles list if it exceeds the maximum size
+            if len(self.profiles) > self.max_profiles:
+                # Keep only the most recent profiles
+                excess = len(self.profiles) - self.max_profiles
+                self.profiles = self.profiles[excess:]
+                logger.debug(f"Trimmed {excess} old query profiles to maintain size limit")
         
         # Log query performance issues
         self._log_query_issue(profile)
-    
-    def _identify_bottlenecks(self, query_job: Any) -> List[Dict[str, Any]]:
-        """
-        Identify bottleneck stages in query execution.
-        
-        Args:
-            query_job (Job): BigQuery job object
-        
-        Returns:
-            List of bottleneck stage details
-        """
-        if not hasattr(query_job, 'query_plan'):
-            return []
-        
-        bottlenecks = []
-        stages = []
-        
-        # Find stages by duration
-        for step in query_job.query_plan:
-            if step.start_ms and step.end_ms:
-                duration = step.end_ms - step.start_ms
-                stages.append((step.id, step.name, duration))
-        
-        # Sort and take top bottlenecks
-        stages.sort(key=lambda x: x[2], reverse=True)
-        for i, (stage_id, stage_name, duration) in enumerate(stages[:3]):
-            bottlenecks.append({
-                'stage_id': stage_id,
-                'stage_name': stage_name,
-                'duration_ms': duration,
-                'rank': i+1
-            })
-        
-        return bottlenecks
-    
-    def _log_query_issue(self, profile: Dict[str, Any]) -> None:
-        """
-        Log details about problematic queries.
-        
-        Args:
-            profile (dict): Query performance profile
-        """
-        issue_type = []
-        if profile['is_slow']:
-            issue_type.append(f"slow ({profile['execution_time_seconds']:.1f}s)")
-        if profile['is_large']:
-            issue_type.append(f"large ({profile['gb_processed']:.1f}GB)")
-        
-        issue_description = " and ".join(issue_type)
-        
-        # Log query performance warning
-        logger.warning(
-            f"Performance issue detected: {issue_description} query. "
-            f"Job ID: {profile['job_id']}. "
-            f"Cache hit: {profile['cache_hit']}."
-        )
-        
-        # Log bottleneck details if available
-        if 'bottleneck_stages' in profile and profile['bottleneck_stages']:
-            bottleneck = profile['bottleneck_stages'][0]
-            logger.info(
-                f"Primary bottleneck: Stage {bottleneck['stage_id']} ({bottleneck['stage_name']}), "
-                f"Duration: {bottleneck['duration_ms'] / 1000:.1f}s"
-            )
 
 class BigQueryOperations:
     """Streamlined BigQuery operations with connection pooling and query profiling."""

@@ -89,8 +89,8 @@ def main():
                 raise ValueError(f"Date range too large: {start_month} to {end_month} spans more than 36 months")
             
             # Log parameters
-            logger.info(f"Processing from {start_month} to {end_month}, parallel={config.get('JOB_PARALLEL', True)}")
-            logger.info(f"Countries to process: {', '.join(config.get('"FILTERS_ALLOWED_COUNTRIES', []))}")
+            logger.info(f"Processing from {start_month} to {end_month}, parallel={config.get('PARALLEL', True)}")
+            logger.info(f"Countries to process: {', '.join(config.get('ALLOWED_COUNTRIES', []))}")
             
             # Ensure destination table exists with optimal schema
             create_customer_data_table_if_not_exists(bq_ops)
@@ -100,7 +100,7 @@ def main():
                 bq_ops, 
                 start_month, 
                 end_month, 
-                config.get("JOB_PARALLEL", True), 
+                config.get("PARALLEL", True), 
                 request_id
             )
             
@@ -114,7 +114,7 @@ def main():
                 "job_id": job_id,
                 "start_month": start_month.isoformat(),
                 "end_month": end_month.isoformat(),
-                "countries": config.get("FILTERS_ALLOWED_COUNTRIES", []),
+                "countries": config.get("ALLOWED_COUNTRIES", []),
                 "successful_months": successful_months,
                 "failed_months": failed_months,
                 "processing_time_seconds": round(elapsed, 2),

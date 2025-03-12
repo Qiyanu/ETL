@@ -26,25 +26,12 @@ def get_config_path(config_file=None):
     config_path = os.path.join(project_root, config_file)
     
     if os.path.exists(config_path):
-        print(f"Found config file at: {config_path}")
         return config_path
     
     # Check relative to current working directory
     current_dir_path = os.path.join(os.getcwd(), config_file)
     if os.path.exists(current_dir_path):
-        print(f"Found config file at: {current_dir_path}")
         return current_dir_path
-    
-    # If no config found, print detailed debugging information
-    print("CONFIG FILE SEARCH PATHS:")
-    print(f"1. Environment CONFIG_FILE: {os.environ.get('CONFIG_FILE')}")
-    print(f"2. Project Root Path: {config_path}")
-    print(f"3. Current Working Directory Path: {current_dir_path}")
-    print(f"4. Current Working Directory: {os.getcwd()}")
-    print(f"5. Absolute path to main.py: {os.path.abspath(__file__)}")
-    print(f"6. Project Root: {project_root}")
-    print(f"7. File Exists in Project Root: {os.path.exists(config_path)}")
-    print(f"8. File Exists in Current Directory: {os.path.exists(current_dir_path)}")
     
     # Raise an error with detailed information
     raise FileNotFoundError(f"""
@@ -122,7 +109,7 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
     for key, expected_type in required_keys.items():
         # Use helper function to access nested keys
         value = _get_nested_config_value(config, key)
-        print(str(key) +" : " + str(value))
+
         if value is None:
             errors.append(f"Missing required configuration key: {key}")
         elif not isinstance(value, expected_type):
@@ -496,8 +483,33 @@ def load_config(config_file=None) -> Dict[str, Any]:
         flat_config["SOURCE_SITE_TABLE"] = flat_config["TABLES_SOURCES_SITE_TABLE"]
     if "TABLES_SOURCES_STORE_TABLE" in flat_config:
         flat_config["SOURCE_STORE_TABLE"] = flat_config["TABLES_SOURCES_STORE_TABLE"]
+        
+    # Map required top-level keys from the nested structure
+    # This is key to make BigQueryOperations work with our nested config structure
+    if "PROCESSING_QUERY_TIMEOUT" in flat_config:
+        flat_config["QUERY_TIMEOUT"] = flat_config["PROCESSING_QUERY_TIMEOUT"]
+    if "PROCESSING_MAX_WORKERS" in flat_config:
+        flat_config["MAX_WORKERS"] = flat_config["PROCESSING_MAX_WORKERS"]
+    if "FILTERS_ALLOWED_COUNTRIES" in flat_config:
+        flat_config["ALLOWED_COUNTRIES"] = flat_config["FILTERS_ALLOWED_COUNTRIES"]
+    if "RESILIENCE_CIRCUIT_BREAKER_THRESHOLD" in flat_config:
+        flat_config["CIRCUIT_BREAKER_THRESHOLD"] = flat_config["RESILIENCE_CIRCUIT_BREAKER_THRESHOLD"]
+    if "RESILIENCE_CIRCUIT_BREAKER_TIMEOUT" in flat_config:
+        flat_config["CIRCUIT_BREAKER_TIMEOUT"] = flat_config["RESILIENCE_CIRCUIT_BREAKER_TIMEOUT"]
+    if "RESILIENCE_MAX_RETRY_ATTEMPTS" in flat_config:
+        flat_config["MAX_RETRY_ATTEMPTS"] = flat_config["RESILIENCE_MAX_RETRY_ATTEMPTS"]
+    if "FILTERS_COUNTRY_MAPPING" in flat_config:
+        flat_config["COUNTRY_MAPPING"] = flat_config["FILTERS_COUNTRY_MAPPING"]
+    if "FILTERS_EXCLUDED_CHAIN_TYPES" in flat_config:
+        flat_config["EXCLUDED_CHAIN_TYPES"] = flat_config["FILTERS_EXCLUDED_CHAIN_TYPES"]
     
+    # Special handling for country mapping (mapped differently in the flattening)
+    if "FILTERS_COUNTRY_MAPPING_ITA" in flat_config and "FILTERS_COUNTRY_MAPPING_ESP" in flat_config:
+        flat_config["COUNTRY_MAPPING"] = {
+            "ITA": flat_config["FILTERS_COUNTRY_MAPPING_ITA"],
+            "ESP": flat_config["FILTERS_COUNTRY_MAPPING_ESP"]
+        }
+        
     # Add the nested config
     flat_config["_NESTED_CONFIG"] = config
-    print(flat_config)
     return flat_config

@@ -17,61 +17,6 @@ from src.etl_processors import (
 )
 from src.shutdown_utils import is_shutdown_requested, request_shutdown, initialize_shutdown_handler
 
-def cleanup_orphaned_temp_tables(bq_ops, max_age_hours=24):
-    """
-    Clean up orphaned temporary tables.
-    
-    Args:
-        bq_ops: BigQuery operations instance
-        max_age_hours: Maximum age of tables to keep in hours
-        
-    Returns:
-        Count of deleted tables and list of deleted table IDs
-    """
-    dataset_id = f"{bq_ops.config['DEST_PROJECT']}.{bq_ops.config['DEST_DATASET']}"
-    
-    # Check if dataset exists
-    try:
-        bq_ops.get_table(f"{dataset_id}.__TABLES__")
-    except Exception:
-        return 0, []
-    
-    # Find temp tables older than the cutoff - FIXED to use timezone-aware datetime
-    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
-    
-    query = f"""
-    SELECT
-      table_id,
-      creation_time
-    FROM
-      `{dataset_id}.INFORMATION_SCHEMA.TABLES`
-    WHERE
-      table_id LIKE 'temp_data_%'
-      AND creation_time < TIMESTAMP("{cutoff_time.isoformat()}")
-    """
-    
-    try:
-        results = bq_ops.execute_query(query, timeout=60)
-        temp_tables = [(row.table_id, row.creation_time) for row in results]
-        
-        if not temp_tables:
-            return 0, []
-            
-        # Delete each table
-        deleted_tables = []
-        for table_id, _ in temp_tables:
-            full_table_id = f"{dataset_id}.{table_id}"
-            try:
-                bq_ops.delete_table(full_table_id)
-                deleted_tables.append(full_table_id)
-            except Exception as e:
-                logger.warning(f"Failed to delete table {full_table_id}: {e}")
-        
-        return len(deleted_tables), deleted_tables
-    except Exception as e:
-        logger.error(f"Error during orphaned table cleanup: {e}")
-        return 0, []
-        
 def main():
     """
     Main entrypoint for the ETL job.
@@ -111,14 +56,6 @@ def main():
         
         logger.info(f"Starting ETL job with ID: {job_id}")
         
-        # Optional cleanup of orphaned tables
-        try:
-            cleanup_age_hours = config.get("TEMP_TABLE_CLEANUP_AGE_HOURS", 24)
-            deleted_count, _ = cleanup_orphaned_temp_tables(bq_ops, max_age_hours=cleanup_age_hours)
-            if deleted_count > 0:
-                logger.info(f"Cleaned up {deleted_count} orphaned temporary tables")
-        except Exception as e:
-            logger.warning(f"Orphaned table cleanup failed: {e}")
         
         # Determine date range to process
         if config.get("JOB_START_MONTH") and config.get("JOB_END_MONTH"):
@@ -194,13 +131,7 @@ def main():
         logger.info(f"Processing completed in {elapsed:.2f}s: {successful_months} months successful, {failed_months} months failed")
         logger.info(f"Job summary: {json.dumps(summary)}")
         
-        # Run final cleanup
-        try:
-            deleted_count, _ = cleanup_orphaned_temp_tables(bq_ops, max_age_hours=4)
-            if deleted_count > 0:
-                logger.info(f"Cleaned up {deleted_count} temporary tables from current run")
-        except Exception as e:
-            logger.warning(f"Final cleanup failed: {e}")
+        
         
         # Exit with appropriate code
         if failed_months > 0:
@@ -221,15 +152,6 @@ def main():
         # Log the error with traceback
         logger.error(f"Critical error: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
-        
-        # Try to clean up temporary tables even if the job failed
-        try:
-            if bq_ops:
-                deleted_count, _ = cleanup_orphaned_temp_tables(bq_ops, max_age_hours=6)
-                if deleted_count > 0:
-                    logger.info(f"Cleaned up {deleted_count} temporary tables after job failure")
-        except Exception:
-            pass
             
         sys.exit(1)
 

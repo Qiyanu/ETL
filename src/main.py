@@ -68,12 +68,44 @@ def main():
             # First, clean up any orphaned temporary tables from previous runs
             try:
                 # Configure cleanup age from config or use default (24 hours)
-                cleanup_age_hours = config.get("TEMP_TABLE_CLEANUP_AGE_HOURS", 24)
-                deleted_count, deleted_tables = cleanup_orphaned_temp_tables(bq_ops, max_age_hours=cleanup_age_hours)
+                cleanup_age_hours = config.get("TEMP_TABLE_CLEANUP_AGE_HOURS", 1)
+                cleanup_timeout_seconds = config.get("CLEANUP_TIMEOUT_SECONDS", 60)
+                logger.info(f"Starting orphaned table cleanup with {cleanup_timeout_seconds}s timeout")
+                import threading
+                cleanup_done = threading.Event()
+                cleanup_result = [0, []]
+                def run_cleanup():
+                    try:
+                        result = cleanup_orphaned_temp_tables(
+                            bq_ops, 
+                            max_age_hours=cleanup_age_hours,
+                            max_wait_seconds=cleanup_timeout_seconds
+                        )
+                        cleanup_result[0] = result[0]
+                        cleanup_result[1] = result[1]
+                    except Exception as e:
+                        logger.warning(f"Cleanup thread encountered an error: {e}")
+                    finally:
+                        cleanup_done.set()
                 
-                if deleted_count > 0:
-                    logger.info(f"Cleaned up {deleted_count} orphaned temporary tables")
-                    logger.debug(f"Deleted tables: {', '.join(deleted_tables)}")
+                # Start cleanup in a separate thread
+                cleanup_thread = threading.Thread(target=run_cleanup)
+                cleanup_thread.daemon = True
+                cleanup_thread.start()
+                
+                # Wait for cleanup with timeout
+                if not cleanup_done.wait(timeout=cleanup_timeout_seconds + 10):  # Add a small buffer
+                    logger.warning("Orphaned table cleanup timed out, continuing with processing")
+                else:
+                    # Log results
+                    deleted_count = cleanup_result[0]
+                    deleted_tables = cleanup_result[1]
+                    
+                    if deleted_count > 0:
+                        logger.info(f"Cleaned up {deleted_count} orphaned temporary tables")
+                        logger.debug(f"Deleted tables: {', '.join(deleted_tables)}")
+                    else:
+                        logger.info("No orphaned temporary tables found to clean up")
             except Exception as cleanup_error:
                 logger.warning(f"Orphaned table cleanup failed: {cleanup_error}")
             

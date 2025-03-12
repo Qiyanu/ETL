@@ -7,13 +7,15 @@ from google.cloud import bigquery
 from src.logging_utils import logger
 from src.bigquery_utils import BigQueryOperations
 
-def cleanup_orphaned_temp_tables(bq_ops, max_age_hours: int = 24) -> Tuple[int, List[str]]:
+def cleanup_orphaned_temp_tables(bq_ops, max_age_hours: int = 24, 
+                                max_wait_seconds: int = 60) -> Tuple[int, List[str]]:
     """
     Cleans up orphaned temporary tables in the destination dataset.
     
     Args:
         bq_ops (BigQueryOperations): BigQuery operations instance
         max_age_hours (int): Maximum age of temporary tables to keep in hours
+        max_wait_seconds (int): Maximum seconds to wait for the cleanup operation
         
     Returns:
         Tuple containing count of deleted tables and list of deleted table IDs
@@ -25,6 +27,20 @@ def cleanup_orphaned_temp_tables(bq_ops, max_age_hours: int = 24) -> Tuple[int, 
     
     # Get list of tables in the dataset
     dataset_id = f"{bq_ops.config['DEST_PROJECT']}.{bq_ops.config['DEST_DATASET']}"
+    
+    # First check if dataset exists
+    try:
+        with bq_ops._get_client() as client:
+            try:
+                # Use a very short timeout just to check dataset existence
+                client.get_dataset(dataset_id, timeout=10)
+                logger.info(f"Dataset {dataset_id} exists, proceeding with cleanup")
+            except Exception as e:
+                logger.warning(f"Dataset {dataset_id} may not exist or is not accessible: {e}")
+                return 0, []
+    except Exception as e:
+        logger.warning(f"Failed to check dataset existence: {e}")
+        return 0, []
     
     # Query to find temporary tables older than the cutoff
     query = f"""
@@ -39,7 +55,8 @@ def cleanup_orphaned_temp_tables(bq_ops, max_age_hours: int = 24) -> Tuple[int, 
     """
     
     try:
-        results = bq_ops.execute_query(query)
+        # Use a shorter timeout specifically for this cleanup query
+        results = bq_ops.execute_query(query, timeout=max_wait_seconds)
         temp_tables = [(row.table_id, row.creation_time) for row in results]
         
         if not temp_tables:

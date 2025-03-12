@@ -1,7 +1,7 @@
 import os
 import yaml
 import logging
-from typing import Dict, Any, Tuple, List, Union
+from typing import Dict, Any, Tuple, List
 
 def get_config_path(config_file=None):
     """
@@ -44,189 +44,9 @@ def get_config_path(config_file=None):
     Please ensure the config.yaml file is in the correct location.
     """)
 
-def _sanitize_table_reference(table_id: str) -> str:
-    """
-    Sanitize a BigQuery table reference to prevent injection attacks.
-    
-    Args:
-        table_id: Table ID to sanitize
-        
-    Returns:
-        str: Sanitized table ID
-    
-    Raises:
-        ValueError: If table ID is invalid
-    """
-    # Validate table reference format
-    parts = table_id.strip().split('.')
-    if len(parts) != 3:
-        raise ValueError(f"Invalid table reference: '{table_id}'. Expected format: 'project.dataset.table'")
-    
-    # Check each part against allowed patterns
-    for i, part in enumerate(parts):
-        # BigQuery naming rules: letters, numbers, and underscores
-        if not all(c.isalnum() or c == '_' or c == '-' for c in part):
-            part_name = ["project", "dataset", "table"][i]
-            raise ValueError(f"Invalid {part_name} name '{part}' in table reference")
-    
-    return '.'.join(parts)
-
-def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
-    """
-    Validate the ETL configuration for required values and proper types.
-    Enhanced with additional security checks and validations.
-    
-    Args:
-        config: Configuration dictionary to validate
-        
-    Returns:
-        Tuple containing validation result (bool) and list of errors (if any)
-    """
-    errors = []
-    
-    # Required configuration keys with expected types
-    required_keys = {
-        "tables.destination": str,
-        "tables.sources.line_table": str,
-        "tables.sources.header_table": str,
-        "tables.sources.card_table": str,
-        "tables.sources.site_table": str,
-        "tables.sources.store_table": str,
-        "processing.max_workers": int,
-        "processing.query_timeout": int,
-        "countries.enabled": list,
-        "countries.mapping": dict,
-        "resilience.enable_retries": bool,
-        "resilience.circuit_breaker_threshold": int,
-        "resilience.circuit_breaker_timeout": int,
-        "resilience.max_retry_attempts": int,
-        "job.max_runtime": int,
-        "job.timeout_safety_margin": int
-    }
-    
-    # Validate presence and types of required keys
-    for key, expected_type in required_keys.items():
-        # Use helper function to access nested keys
-        value = _get_nested_config_value(config, key)
-
-        if value is None:
-            errors.append(f"Missing required configuration key: {key}")
-        elif not isinstance(value, expected_type):
-            errors.append(f"Invalid type for {key}: expected {expected_type.__name__}, got {type(value).__name__}")
-    
-    # Validate enabled countries
-    enabled_countries = _get_nested_config_value(config, "countries.enabled")
-    if isinstance(enabled_countries, list):
-        if len(enabled_countries) == 0:
-            errors.append("countries.enabled list cannot be empty")
-        
-        # Ensure all country codes are supported by query templates
-        for country in enabled_countries:
-            if not isinstance(country, str):
-                errors.append(f"Country code must be a string, got: {type(country).__name__}")
-                continue
-                
-            # Check for country filters
-            country_filters = _get_nested_config_value(config, f"countries.filters.{country}")
-            if country_filters is None:
-                errors.append(f"Missing filters for enabled country: {country}")
-    
-    # Validate country mappings
-    country_mapping = _get_nested_config_value(config, "countries.mapping")
-    if isinstance(country_mapping, dict) and isinstance(enabled_countries, list):
-        # Validate country mapping keys and values
-        for country, mapping in country_mapping.items():
-            if not isinstance(country, str):
-                errors.append(f"Country mapping key must be a string, got: {type(country).__name__}")
-            if not isinstance(mapping, str):
-                errors.append(f"Country mapping value for '{country}' must be a string, got: {type(mapping).__name__}")
-        
-        # Check for missing mappings
-        for country in enabled_countries:
-            if isinstance(country, str) and country not in country_mapping:
-                errors.append(f"Missing country mapping for {country}")
-    
-    # Validate temp_tables settings if present
-    temp_tables = _get_nested_config_value(config, "temp_tables")
-    if temp_tables is not None:
-        if not isinstance(temp_tables, dict):
-            errors.append(f"temp_tables must be a dictionary, got: {type(temp_tables).__name__}")
-        else:
-            if "cleanup_age_hours" in temp_tables and not isinstance(temp_tables["cleanup_age_hours"], (int, float)):
-                errors.append(f"temp_tables.cleanup_age_hours must be a number, got: {type(temp_tables['cleanup_age_hours']).__name__}")
-            if "expiration_hours" in temp_tables and not isinstance(temp_tables["expiration_hours"], (int, float)):
-                errors.append(f"temp_tables.expiration_hours must be a number, got: {type(temp_tables['expiration_hours']).__name__}")
-    
-    # Validate connection_pool settings if present
-    conn_pool = _get_nested_config_value(config, "connection_pool")
-    if conn_pool is not None:
-        if not isinstance(conn_pool, dict):
-            errors.append(f"connection_pool must be a dictionary, got: {type(conn_pool).__name__}")
-        else:
-            if "shutdown_timeout" in conn_pool and not isinstance(conn_pool["shutdown_timeout"], int):
-                errors.append(f"connection_pool.shutdown_timeout must be an integer, got: {type(conn_pool['shutdown_timeout']).__name__}")
-            if "max_connections" in conn_pool and not isinstance(conn_pool["max_connections"], int):
-                errors.append(f"connection_pool.max_connections must be an integer, got: {type(conn_pool['max_connections']).__name__}")
-            
-    # Validate query_profiling settings if present
-    query_profiling = _get_nested_config_value(config, "query_profiling")
-    if query_profiling is not None:
-        if not isinstance(query_profiling, dict):
-            errors.append(f"query_profiling must be a dictionary, got: {type(query_profiling).__name__}")
-        else:
-            if "max_profiles" in query_profiling and not isinstance(query_profiling["max_profiles"], int):
-                errors.append(f"query_profiling.max_profiles must be an integer, got: {type(query_profiling['max_profiles']).__name__}")
-    
-    # Return validation result
-    return len(errors) == 0, errors
-
-def _get_nested_config_value(config, key_path):
-    """
-    Access a nested configuration value using dot notation.
-    
-    Args:
-        config: Configuration dictionary
-        key_path: Dot-separated path to the config value
-        
-    Returns:
-        The value or None if not found
-    """
-    keys = key_path.split('.')
-    value = config
-    
-    for key in keys:
-        if isinstance(value, dict) and key in value:
-            value = value[key]
-        else:
-            return None
-            
-    return value
-
-def _set_nested_config_value(config, key_path, new_value):
-    """
-    Set a nested configuration value using dot notation.
-    
-    Args:
-        config: Configuration dictionary
-        key_path: Dot-separated path to the config value
-        new_value: Value to set
-    """
-    keys = key_path.split('.')
-    current = config
-    
-    # Navigate to the parent of the target key
-    for key in keys[:-1]:
-        if key not in current:
-            current[key] = {}
-        current = current[key]
-    
-    # Set the value
-    current[keys[-1]] = new_value
-
 def _convert_env_value(default_value: Any, env_value: str) -> Any:
     """
     Convert environment variable to appropriate type based on default value.
-    With improved error handling and type safety.
     
     Args:
         default_value: Original default value defining the expected type
@@ -264,7 +84,7 @@ def _convert_env_value(default_value: Any, env_value: str) -> Any:
         else:
             return env_value
     except (ValueError, TypeError) as e:
-        logging.warning(f"Invalid env value for key: {env_value}, using default. Error: {e}")
+        logging.warning(f"Invalid env value: {env_value}, using default. Error: {e}")
         return default_value
 
 def _flatten_config(config, prefix=''):
@@ -294,10 +114,6 @@ def _handle_env_overrides(config):
     """
     Apply environment variable overrides to the configuration.
     
-    Environment variables override config values using either:
-    1. Direct key match (ETL_MAX_WORKERS overrides processing.max_workers)
-    2. Dot notation (ETL_PROCESSING_MAX_WORKERS overrides processing.max_workers)
-    
     Args:
         config: Configuration dictionary
     """
@@ -311,36 +127,77 @@ def _handle_env_overrides(config):
         env_value = os.environ.get(env_key)
         
         if env_value is not None:
-            new_value = _convert_env_value(value, env_value)
-            _set_nested_config_value(config, flat_key, new_value)
+            # Update corresponding values in the original (nested) config
+            keys = flat_key.split('.')
+            target = config
+            for k in keys[:-1]:
+                if k not in target:
+                    target[k] = {}
+                target = target[k]
+            
+            # Convert and set the value
+            target[keys[-1]] = _convert_env_value(value, env_value)
             logging.info(f"Environment override applied: {env_key} -> {flat_key}")
 
 def load_config(config_file=None) -> Dict[str, Any]:
     """
-    Load configuration from YAML file with environment overrides and validation.
+    Load configuration from YAML file with environment overrides.
     
     Args:
         config_file: Path to the configuration file
         
     Returns:
         Validated configuration dictionary
-        
-    Raises:
-        ValueError: If configuration contains critical errors
     """
     logger = logging.getLogger()
     
     # Start with minimal default configuration
-    # Only defaults that are absolutely necessary for startup
     config = {
-        "job": {
-            "max_runtime": 86400,  # 24 hours
-            "timeout_safety_margin": 1800  # 30 minutes
+        "tables": {
+            "destination": "c4-marketing-dev-347012.customer_data.customer_data_test",
+            "sources": {
+                "line_table": "c4-united-datasharing-prd.datasharing_marketing_group_dashboard.a_ww_sales_trx_line",
+                "header_table": "c4-united-datasharing-prd.datasharing_marketing_group_dashboard.a_ww_sales_trx_header",
+                "card_table": "c4-united-datasharing-prd.datasharing_marketing_group_dashboard.d_card",
+                "site_table": "c4-united-datasharing-prd.datasharing_marketing_group_dashboard.d_ww_oc_site",
+                "store_table": "c4-united-datasharing-prd.datasharing_marketing_group_dashboard.d_ww_store"
+            }
         },
-        "logging": {
-            "level": "INFO"
+        "processing": {
+            "query_timeout": 3600,
+            "max_workers": 8,
+            "location": "EU"
+        },
+        "countries": {
+            "enabled": ["ITA", "ESP"],
+            "mapping": {"ITA": "IT", "ESP": "SP"},
+            "filters": {
+                "ITA": {"excluded_chain_types": ["SUPECO", "Galerie", "AUTRES"]},
+                "ESP": {
+                    "excluded_business_brands": ["supeco"],
+                    "excluded_ecm_combinations": [{"business_brand": "alcampo", "activity_type": "ECM"}]
+                }
+            }
+        },
+        "job": {
+            "last_n_months": 3,
+            "parallel": True
+        },
+        "resilience": {
+            "max_retry_attempts": 3
+        },
+        "temp_tables": {
+            "cleanup_age_hours": 24,
+            "expiration_hours": 24
         }
     }
+    
+    # Find configuration file
+    if config_file is None:
+        try:
+            config_file = get_config_path()
+        except FileNotFoundError as e:
+            logger.warning(str(e))
     
     # Try to load from YAML file if provided
     if config_file and os.path.exists(config_file):
@@ -352,28 +209,15 @@ def load_config(config_file=None) -> Dict[str, Any]:
                     logger.warning(f"Empty configuration file: {config_file}")
                 else:
                     logger.info(f"Loaded configuration from {config_file}")
-                    config = loaded_config
+                    # Merge with defaults
+                    config.update(loaded_config)
         except Exception as e:
             logger.error(f"Error loading config file {config_file}: {e}")
-            # Fall back to default configuration
     else:
-        logger.warning(f"Configuration file not found: {config_file}. Using minimal defaults.")
+        logger.warning(f"Configuration file not found, using defaults")
 
     # Apply environment variable overrides
     _handle_env_overrides(config)
-    
-    # Validate configuration
-    is_valid, errors = validate_config(config)
-    if not is_valid:
-        error_message = "\n  - ".join(["Configuration validation errors:"] + errors)
-        logger.error(error_message)
-        
-        # Determine if errors are fatal
-        fatal_errors = [e for e in errors if "Missing required" in e]
-        if fatal_errors:
-            raise ValueError(error_message)
-        else:
-            logger.warning("Using configuration despite warnings")
     
     # Convert nested config to flat for easy access
     flat_config = {}
@@ -389,88 +233,78 @@ def load_config(config_file=None) -> Dict[str, Any]:
     # Flatten to uppercase keys for compatibility with existing code
     flatten_dict(config)
     
-    # Add a few convenience keys
-    if "TABLES_DESTINATION" in flat_config:
-        # Parse destination table into components
-        parts = flat_config["TABLES_DESTINATION"].split('.')
+    # Add convenient direct access keys
+    tables_dest = config.get('tables', {}).get('destination')
+    if tables_dest:
+        flat_config["DEST_TABLE"] = tables_dest
+        parts = tables_dest.split('.')
         if len(parts) == 3:
             flat_config["DEST_PROJECT"] = parts[0]
             flat_config["DEST_DATASET"] = parts[1]
             flat_config["DEST_TABLE_NAME"] = parts[2]
-            flat_config["DEST_TABLE"] = flat_config["TABLES_DESTINATION"]
-            
-    # Map source tables
-    if "TABLES_SOURCES_LINE_TABLE" in flat_config:
-        flat_config["SOURCE_LINE_TABLE"] = flat_config["TABLES_SOURCES_LINE_TABLE"]
-    if "TABLES_SOURCES_HEADER_TABLE" in flat_config:
-        flat_config["SOURCE_HEADER_TABLE"] = flat_config["TABLES_SOURCES_HEADER_TABLE"]
-    if "TABLES_SOURCES_CARD_TABLE" in flat_config:
-        flat_config["SOURCE_CARD_TABLE"] = flat_config["TABLES_SOURCES_CARD_TABLE"]
-    if "TABLES_SOURCES_SITE_TABLE" in flat_config:
-        flat_config["SOURCE_SITE_TABLE"] = flat_config["TABLES_SOURCES_SITE_TABLE"]
-    if "TABLES_SOURCES_STORE_TABLE" in flat_config:
-        flat_config["SOURCE_STORE_TABLE"] = flat_config["TABLES_SOURCES_STORE_TABLE"]
-        
-    # Map required top-level keys from the nested structure
-    # This is key to make BigQueryOperations work with our nested config structure
-    if "PROCESSING_QUERY_TIMEOUT" in flat_config:
-        flat_config["QUERY_TIMEOUT"] = flat_config["PROCESSING_QUERY_TIMEOUT"]
-    if "PROCESSING_MAX_WORKERS" in flat_config:
-        flat_config["MAX_WORKERS"] = flat_config["PROCESSING_MAX_WORKERS"]
-    if "FILTERS_ALLOWED_COUNTRIES" in flat_config:
-        flat_config["ALLOWED_COUNTRIES"] = flat_config["FILTERS_ALLOWED_COUNTRIES"]
-    if "RESILIENCE_CIRCUIT_BREAKER_THRESHOLD" in flat_config:
-        flat_config["CIRCUIT_BREAKER_THRESHOLD"] = flat_config["RESILIENCE_CIRCUIT_BREAKER_THRESHOLD"]
-    if "RESILIENCE_CIRCUIT_BREAKER_TIMEOUT" in flat_config:
-        flat_config["CIRCUIT_BREAKER_TIMEOUT"] = flat_config["RESILIENCE_CIRCUIT_BREAKER_TIMEOUT"]
-    if "RESILIENCE_MAX_RETRY_ATTEMPTS" in flat_config:
-        flat_config["MAX_RETRY_ATTEMPTS"] = flat_config["RESILIENCE_MAX_RETRY_ATTEMPTS"]
-    if "COUNTRIES_ENABLED" in flat_config:
-        flat_config["ALLOWED_COUNTRIES"] = flat_config["COUNTRIES_ENABLED"]
-    if "COUNTRIES_MAPPING" in flat_config:
-        flat_config["COUNTRY_MAPPING"] = flat_config["COUNTRIES_MAPPING"]
-    if "FILTERS_COUNTRY_MAPPING" in flat_config:
-        flat_config["COUNTRY_MAPPING"] = flat_config["FILTERS_COUNTRY_MAPPING"]
-    if "FILTERS_EXCLUDED_CHAIN_TYPES" in flat_config:
-        flat_config["EXCLUDED_CHAIN_TYPES"] = flat_config["FILTERS_EXCLUDED_CHAIN_TYPES"]
     
-    # Map temporary table settings
-    if "TEMP_TABLES_CLEANUP_AGE_HOURS" in flat_config:
-        flat_config["TEMP_TABLE_CLEANUP_AGE_HOURS"] = flat_config["TEMP_TABLES_CLEANUP_AGE_HOURS"]
-    if "TEMP_TABLES_EXPIRATION_HOURS" in flat_config:
-        flat_config["TEMP_TABLE_EXPIRATION_HOURS"] = flat_config["TEMP_TABLES_EXPIRATION_HOURS"]
-    if "TEMP_TABLES_ADD_DESCRIPTIONS" in flat_config:
-        flat_config["TEMP_TABLE_ADD_DESCRIPTIONS"] = flat_config["TEMP_TABLES_ADD_DESCRIPTIONS"]
-
-    # Map query profiling settings
-    if "QUERY_PROFILING_MAX_PROFILES" in flat_config:
-        flat_config["MAX_QUERY_PROFILES"] = flat_config["QUERY_PROFILING_MAX_PROFILES"]
-    if "QUERY_PROFILING_ENABLE_QUERY_PLAN_ANALYSIS" in flat_config:
-        flat_config["ENABLE_QUERY_PLAN_ANALYSIS"] = flat_config["QUERY_PROFILING_ENABLE_QUERY_PLAN_ANALYSIS"]
-    if "QUERY_PROFILING_SLOW_QUERY_THRESHOLD_SECONDS" in flat_config:
-        flat_config["SLOW_QUERY_THRESHOLD_SECONDS"] = flat_config["QUERY_PROFILING_SLOW_QUERY_THRESHOLD_SECONDS"]
-    if "QUERY_PROFILING_LARGE_QUERY_THRESHOLD_BYTES" in flat_config:
-        flat_config["LARGE_QUERY_THRESHOLD_BYTES"] = flat_config["QUERY_PROFILING_LARGE_QUERY_THRESHOLD_BYTES"]
-
-    # Map connection pool settings
-    if "CONNECTION_POOL_SHUTDOWN_TIMEOUT" in flat_config:
-        flat_config["CONNECTION_POOL_SHUTDOWN_TIMEOUT"] = flat_config["CONNECTION_POOL_SHUTDOWN_TIMEOUT"]
-    if "CONNECTION_POOL_MAX_CONNECTIONS" in flat_config:
-        flat_config["MAX_CONNECTIONS"] = flat_config["CONNECTION_POOL_MAX_CONNECTIONS"]
-    if "CONNECTION_POOL_MAX_TOTAL_CONNECTIONS" in flat_config:
-        flat_config["MAX_TOTAL_CONNECTIONS"] = flat_config["CONNECTION_POOL_MAX_TOTAL_CONNECTIONS"]
-
-    # Map metrics settings
-    if "METRICS_MAX_HISTORY_PER_METRIC" in flat_config:
-        flat_config["METRICS_MAX_HISTORY"] = flat_config["METRICS_MAX_HISTORY_PER_METRIC"]
-        
-    # Special handling for country mapping (mapped differently in the flattening)
-    if "FILTERS_COUNTRY_MAPPING_ITA" in flat_config and "FILTERS_COUNTRY_MAPPING_ESP" in flat_config:
-        flat_config["COUNTRY_MAPPING"] = {
-            "ITA": flat_config["FILTERS_COUNTRY_MAPPING_ITA"],
-            "ESP": flat_config["FILTERS_COUNTRY_MAPPING_ESP"]
-        }
-        
-    # Add the nested config
+    # Add source tables for direct access
+    sources = config.get('tables', {}).get('sources', {})
+    if sources:
+        if 'line_table' in sources:
+            flat_config["SOURCE_LINE_TABLE"] = sources['line_table']
+        if 'header_table' in sources:
+            flat_config["SOURCE_HEADER_TABLE"] = sources['header_table']
+        if 'card_table' in sources:
+            flat_config["SOURCE_CARD_TABLE"] = sources['card_table']
+        if 'site_table' in sources:
+            flat_config["SOURCE_SITE_TABLE"] = sources['site_table']
+        if 'store_table' in sources:
+            flat_config["SOURCE_STORE_TABLE"] = sources['store_table']
+    
+    # Add countries for direct access
+    countries = config.get('countries', {})
+    if countries:
+        if 'enabled' in countries:
+            flat_config["ALLOWED_COUNTRIES"] = countries['enabled']
+        if 'mapping' in countries:
+            flat_config["COUNTRY_MAPPING"] = countries['mapping']
+        if 'filters' in countries:
+            for country_code, filters in countries['filters'].items():
+                flat_config[f"COUNTRIES_FILTERS_{country_code}"] = filters
+    
+    # Add processing params
+    processing = config.get('processing', {})
+    if processing:
+        if 'query_timeout' in processing:
+            flat_config["QUERY_TIMEOUT"] = processing['query_timeout']
+        if 'max_workers' in processing:
+            flat_config["MAX_WORKERS"] = processing['max_workers']
+        if 'location' in processing:
+            flat_config["LOCATION"] = processing['location']
+    
+    # Add job params
+    job = config.get('job', {})
+    if job:
+        if 'last_n_months' in job:
+            flat_config["JOB_LAST_N_MONTHS"] = job['last_n_months']
+        if 'parallel' in job:
+            flat_config["JOB_PARALLEL"] = job['parallel']
+        if 'start_month' in job:
+            flat_config["JOB_START_MONTH"] = job['start_month']
+        if 'end_month' in job:
+            flat_config["JOB_END_MONTH"] = job['end_month']
+    
+    # Add temp tables params
+    temp_tables = config.get('temp_tables', {})
+    if temp_tables:
+        if 'cleanup_age_hours' in temp_tables:
+            flat_config["TEMP_TABLE_CLEANUP_AGE_HOURS"] = temp_tables['cleanup_age_hours']
+        if 'expiration_hours' in temp_tables:
+            flat_config["TEMP_TABLE_EXPIRATION_HOURS"] = temp_tables['expiration_hours']
+    
+    # Add resilience params
+    resilience = config.get('resilience', {})
+    if resilience:
+        if 'max_retry_attempts' in resilience:
+            flat_config["MAX_RETRY_ATTEMPTS"] = resilience['max_retry_attempts']
+    
+    # Store the original nested config
     flat_config["_NESTED_CONFIG"] = config
+    
     return flat_config

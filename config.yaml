@@ -20,16 +20,6 @@ processing:
   
   # BigQuery geographic location
   location: "EU"
-  
-  # Resource usage limits
-  resource_limits:
-    target_cpu_usage: 0.8
-    cpu_scale_up_threshold: 0.9
-    cpu_scale_down_threshold: 0.6
-    target_memory_usage: 0.7
-    memory_scale_up_threshold: 0.9
-    memory_scale_down_threshold: 0.55
-    memory_limit_threshold: 0.9
 
 # Temporary Tables Configuration
 temp_tables:
@@ -40,44 +30,17 @@ temp_tables:
   # Whether to add descriptions to temporary tables
   add_descriptions: true
 
-# Query Profiling Configuration
-query_profiling:
-  # Maximum number of query profiles to store in memory
-  max_profiles: 100
-  # Enable detailed query plan analysis
-  enable_query_plan_analysis: true
-  # Threshold in seconds for slow query detection (7 minutes default)
-  slow_query_threshold_seconds: 420
-  # Threshold in bytes for large query detection (20GB default)
-  large_query_threshold_bytes: 21474836480
-
-# Connection Pool Configuration
-connection_pool:
-  # Timeout in seconds for graceful connection pool shutdown
-  shutdown_timeout: 60
-  # Maximum connections to keep in pool
-  max_connections: 10
-  # Maximum total connections allowed
-  max_total_connections: 20
-
-# Metrics Configuration
-metrics:
-  # Maximum number of values to store per metric
-  max_history_per_metric: 1000
-
 # Countries Configuration
 countries:
   # Country code mappings
   mapping:
     "ITA": "IT"
     "ESP": "SP"
-    # Add more country mappings here as needed
   
   # Enabled countries
   enabled:
     - "ITA"
     - "ESP"
-    # Add more country codes here as needed
   
   # Country-specific filters
   filters:
@@ -100,17 +63,7 @@ countries:
 
 # Job Configuration
 job:
-  # Maximum runtime in seconds (24 hours)
-  max_runtime: 86400
-  
-  # Safety margin before job timeout (30 minutes)
-  timeout_safety_margin: 1800
-  
-  # Optional: Specify specific months to process
-  # start_month: "2025-01-01"
-  # end_month: "2025-02-01"
-  
-  # Or process last N months
+  # Process last N months
   last_n_months: 3
   
   # Whether to process months in parallel
@@ -118,17 +71,10 @@ job:
 
 # Resilience Configuration
 resilience:
-  # Enable automatic retries for transient failures
-  enable_retries: true
-  
   # Maximum retry attempts
   max_retry_attempts: 5
-  
-  # Circuit breaker settings
-  circuit_breaker_threshold: 5
-  circuit_breaker_timeout: 300
 
 # Logging Configuration
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR, or CRITICAL
-  level: "INFO"
+  level: "DEBUG"

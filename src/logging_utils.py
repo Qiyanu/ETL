@@ -4,17 +4,16 @@ import os
 import traceback
 import json
 import threading
-from typing import Optional, Union, Dict, Any
+from typing import Optional, Any
 
 class ETLLogger:
     """
-    Advanced logging utility for ETL processes with structured logging support.
+    Simplified logging utility for ETL processes with structured logging.
     
     Provides:
-    - Structured JSON logging for cloud environments
+    - Structured JSON logging
     - Correlation ID tracking with thread safety
     - Service name tracking
-    - Flexible log level configuration
     """
     
     def __init__(self, service_name: Optional[str] = None, log_level: Optional[str] = None):
@@ -33,7 +32,7 @@ class ETLLogger:
             self._logger.handlers.clear()
         
         # Set service name
-        self._service = service_name or os.environ.get("K_SERVICE", "local")
+        self._service = service_name or os.environ.get("K_SERVICE", "etl-service")
         
         # Add thread-safe context tracking
         self._thread_local = threading.local()
@@ -54,19 +53,17 @@ class ETLLogger:
                 record.service = logger_instance._service
                 return True
         
-        # Create handler for stdout (cloud-friendly)
+        # Create handler for stdout
         handler = logging.StreamHandler(sys.stdout)
         
         # Structured JSON formatter
         formatter = logging.Formatter(
             json.dumps({
                 "timestamp": "%(asctime)s",
-                "severity": "%(levelname)s", 
+                "level": "%(levelname)s", 
                 "correlation_id": "%(correlation_id)s", 
                 "service": "%(service)s", 
-                "message": "%(message)s",
-                "module": "%(module)s",
-                "line": "%(lineno)d"
+                "message": "%(message)s"
             })
         )
         handler.setFormatter(formatter)
@@ -89,31 +86,25 @@ class ETLLogger:
         self._logger.warning(msg, *args, **kwargs)
     
     def error(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        """
-        Log an error message.
-        
-        Optionally includes traceback if exc_info is True.
-        """
+        """Log an error message."""
         self._logger.error(msg, *args, **kwargs)
     
     def critical(self, msg: str, *args: Any, **kwargs: Any) -> None:
         """Log a critical message."""
         self._logger.critical(msg, *args, **kwargs)
     
-    def log_error_with_trace(self, error: Union[Exception, str]) -> None:
+    def log_error_with_trace(self, error: Exception) -> None:
         """
         Log an error with full traceback.
         
         Args:
-            error (Exception or str): Error to log, can be an exception or error message
+            error (Exception): Error to log
         """
         if isinstance(error, Exception):
-            # Log full exception details
             error_msg = f"{type(error).__name__}: {str(error)}"
             trace = traceback.format_exc()
-            self.error(f"Exception occurred: {error_msg}\nFull Traceback:\n{trace}")
+            self.error(f"Exception occurred: {error_msg}\nTraceback:\n{trace}")
         else:
-            # Log string error message
             self.error(str(error))
     
     def set_correlation_id(self, correlation_id: str) -> None:
@@ -135,6 +126,5 @@ class ETLLogger:
         """
         self._service = service_name
 
-# Global logger instance with better thread safety
-# This can be imported and used across the application
+# Global logger instance
 logger = ETLLogger()

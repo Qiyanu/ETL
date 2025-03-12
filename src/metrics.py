@@ -5,7 +5,7 @@ import json
 
 class Metrics:
     """
-    A lightweight, thread-safe metrics collection class.
+    A simplified, thread-safe metrics collection class.
     
     Provides functionality to:
     - Start and stop timers
@@ -14,14 +14,12 @@ class Metrics:
     - Generate summary statistics
     """
     
-    def __init__(self, max_history_per_metric=1000):
+    def __init__(self, max_history_per_metric=100):
         """
         Initialize the metrics collector.
         
         Args:
             max_history_per_metric (int): Maximum number of values to store per metric
-        
-        Uses a thread lock to ensure thread-safe operations.
         """
         self.metrics: Dict[str, Union[List[float], int]] = {}
         self.start_times: Dict[str, Dict[int, float]] = {}  # Track timers per thread
@@ -75,7 +73,7 @@ class Metrics:
     
     def record_value(self, metric_name: str, value: float) -> None:
         """
-        Record a numeric value for a specific metric with size limits to prevent memory leaks.
+        Record a numeric value for a specific metric with size limits.
         
         Args:
             metric_name (str): Name of the metric
@@ -88,9 +86,8 @@ class Metrics:
             if isinstance(self.metrics[metric_name], list):
                 self.metrics[metric_name].append(value)
                 
-                # Keep the list size bounded to prevent memory leaks
+                # Keep the list size bounded
                 if len(self.metrics[metric_name]) > self.max_history_per_metric:
-                    # Only keep the most recent values
                     self.metrics[metric_name] = self.metrics[metric_name][-self.max_history_per_metric:]
     
     def increment_counter(self, metric_name: str, increment: int = 1) -> None:
@@ -113,8 +110,7 @@ class Metrics:
         Generate a summary of all collected metrics.
         
         Returns:
-            Dict containing summary statistics for list-based metrics,
-            and current values for counter metrics.
+            Dict containing summary statistics.
         """
         summary: Dict[str, Any] = {}
         
@@ -152,47 +148,10 @@ class Metrics:
     def reset(self) -> None:
         """
         Reset all metrics and timers.
-        Useful for starting a new measurement cycle.
         """
         with self.lock:
             self.metrics.clear()
             self.start_times.clear()
-    
-    def export_to_json(self, file_path: str) -> bool:
-        """
-        Export metrics summary to a JSON file.
-        
-        Args:
-            file_path (str): Path to the output JSON file
-            
-        Returns:
-            bool: True if export succeeded, False otherwise
-        """
-        try:
-            summary = self.get_summary()
-            with open(file_path, 'w') as f:
-                json.dump(summary, f, indent=2)
-            return True
-        except Exception:
-            return False
-    
-    def export_to_cloud_monitoring(self) -> bool:
-        """
-        Export metrics to Cloud Monitoring if available.
-        
-        Returns:
-            bool: True if export succeeded, False otherwise
-        """
-        try:
-            from google.cloud import monitoring_v3
-            
-            # Implementation would go here
-            # This is a placeholder - actual implementation would
-            # require more detailed integration with Google Cloud Monitoring
-            
-            return True
-        except (ImportError, Exception):
-            return False
     
     def __str__(self) -> str:
         """
@@ -205,4 +164,4 @@ class Metrics:
         return f"Metrics: {json.dumps(summary, indent=2)}"
 
 # Global metrics collector instance
-metrics = Metrics(max_history_per_metric=1000)
+metrics = Metrics(max_history_per_metric=100)

@@ -1,8 +1,9 @@
 import time
 import uuid
+import threading
 from datetime import date, datetime, timezone
 from typing import Dict, List, Tuple, Optional, Set
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
 
 from google.cloud import bigquery
 from dateutil.relativedelta import relativedelta
@@ -58,7 +59,8 @@ def create_customer_data_table_if_not_exists(bq_ops):
         clustering_fields=["Country", "Enseigne"]
     )
 
-def create_temp_table_for_month(bq_ops, the_month, temp_table_id, country, request_id=None):
+def create_temp_table_for_month(bq_ops, the_month, temp_table_id, country, request_id=None, 
+                               max_query_time=600):
     """
     Creates a temporary table with aggregated data for the month and country.
     
@@ -68,6 +70,7 @@ def create_temp_table_for_month(bq_ops, the_month, temp_table_id, country, reque
         temp_table_id: ID for the temporary table
         country: Country code to process
         request_id: Unique request identifier
+        max_query_time: Maximum time in seconds to wait for the query
     
     Returns:
         Number of rows in the created temporary table
@@ -101,7 +104,8 @@ def create_temp_table_for_month(bq_ops, the_month, temp_table_id, country, reque
                 param._value = the_month
         
         # Execute query to create temporary table
-        bq_ops.execute_query(create_temp_table_query, params)
+        logger.info(f"Executing query to create temp table with timeout {max_query_time}s")
+        bq_ops.execute_query(create_temp_table_query, params, timeout=max_query_time)
         
         # Set expiration if not already set
         try:
@@ -115,8 +119,12 @@ def create_temp_table_for_month(bq_ops, the_month, temp_table_id, country, reque
         except Exception as e:
             logger.warning(f"Unable to update table expiration: {e}")
         
-        # Check row count
-        query_result = bq_ops.execute_query(f"SELECT COUNT(*) as row_count FROM `{temp_table_id}`")
+        # Check row count with a short timeout
+        logger.info("Checking row count in created table")
+        query_result = bq_ops.execute_query(
+            f"SELECT COUNT(*) as row_count FROM `{temp_table_id}`", 
+            timeout=30
+        )
         rows = list(query_result)
         row_count = rows[0].row_count if rows else 0
         metrics.record_value("temp_table_row_count", row_count)
@@ -132,7 +140,7 @@ def create_temp_table_for_month(bq_ops, the_month, temp_table_id, country, reque
         logger.error(f"Failed to create temp table: {e}")
         raise
 
-def insert_from_temp_to_final(bq_ops, temp_table_id, the_month):
+def insert_from_temp_to_final(bq_ops, temp_table_id, the_month, max_query_time=300):
     """
     Insert data from temporary table to final table.
     
@@ -140,6 +148,7 @@ def insert_from_temp_to_final(bq_ops, temp_table_id, the_month):
         bq_ops: BigQuery operations instance
         temp_table_id: ID of the temporary table
         the_month: Month of the data
+        max_query_time: Maximum time in seconds to wait for query execution
     
     Returns:
         Number of rows inserted
@@ -148,8 +157,9 @@ def insert_from_temp_to_final(bq_ops, temp_table_id, the_month):
     
     try:
         # Get distinct countries in temp table
+        logger.info("Querying for distinct countries in temp table")
         countries_query = f"SELECT DISTINCT Country FROM `{temp_table_id}`"
-        countries_result = bq_ops.execute_query(countries_query)
+        countries_result = bq_ops.execute_query(countries_query, timeout=30)
         countries = [row.Country for row in countries_result]
         
         if not countries:
@@ -170,7 +180,8 @@ def insert_from_temp_to_final(bq_ops, temp_table_id, the_month):
         """
         
         delete_params = [bigquery.ScalarQueryParameter("theMonth", "DATE", the_month)] + countries_params
-        bq_ops.execute_query(delete_query, delete_params)
+        logger.info(f"Deleting existing data for {the_month} and countries: {', '.join(countries)}")
+        bq_ops.execute_query(delete_query, delete_params, timeout=max_query_time)
         
         # Insert from temp table
         insert_query = f"""
@@ -178,7 +189,8 @@ def insert_from_temp_to_final(bq_ops, temp_table_id, the_month):
         SELECT * FROM `{temp_table_id}`
         """
         
-        bq_ops.execute_query(insert_query)
+        logger.info(f"Inserting new data from temp table {temp_table_id}")
+        bq_ops.execute_query(insert_query, timeout=max_query_time)
         
         # Count inserted rows
         count_query = f"""
@@ -187,7 +199,8 @@ def insert_from_temp_to_final(bq_ops, temp_table_id, the_month):
         WHERE Mois = @theMonth
         AND Country IN ({countries_str})
         """
-        count_result = bq_ops.execute_query(count_query, delete_params)
+        logger.info("Counting inserted rows")
+        count_result = bq_ops.execute_query(count_query, delete_params, timeout=30)
         rows = list(count_result)
         rows_affected = rows[0].row_count if rows else 0
         
@@ -216,6 +229,7 @@ def delete_temp_table(bq_ops, temp_table_id):
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            logger.info(f"Deleting temp table: {temp_table_id} (attempt {attempt+1}/{max_retries})")
             bq_ops.delete_table(temp_table_id, not_found_ok=True)
             logger.info(f"Deleted temp table: {temp_table_id}")
             return True
@@ -226,7 +240,7 @@ def delete_temp_table(bq_ops, temp_table_id):
             time.sleep(2 ** attempt)  # Simple exponential backoff
     return False
 
-def process_month_for_country(bq_ops, the_month, country, request_id):
+def process_month_for_country(bq_ops, the_month, country, request_id, max_query_time=600):
     """
     Process data for a specific month and country.
     
@@ -235,6 +249,7 @@ def process_month_for_country(bq_ops, the_month, country, request_id):
         the_month: Month to process
         country: Country code to process
         request_id: Unique request identifier
+        max_query_time: Maximum time in seconds to wait for main queries
     
     Returns:
         Success status and number of rows inserted
@@ -251,10 +266,12 @@ def process_month_for_country(bq_ops, the_month, country, request_id):
     
     try:
         # Create temp table
-        create_temp_table_for_month(bq_ops, the_month, temp_table_id, country, request_id)
+        create_temp_table_for_month(bq_ops, the_month, temp_table_id, country, 
+                                   request_id, max_query_time=max_query_time)
         
         # Insert into final table
-        rows_inserted = insert_from_temp_to_final(bq_ops, temp_table_id, the_month)
+        rows_inserted = insert_from_temp_to_final(bq_ops, temp_table_id, the_month, 
+                                               max_query_time=max_query_time)
         
         logger.info(f"Successfully processed {the_month} for {country}: {rows_inserted} rows")
         return True, rows_inserted
@@ -270,7 +287,9 @@ def process_month_for_country(bq_ops, the_month, country, request_id):
         except Exception as e:
             logger.warning(f"Failed to clean up temporary table {temp_table_id}: {e}")
 
-def process_all_country_month_combinations(bq_ops, months, countries, request_id):
+def process_all_country_month_combinations(bq_ops, months, countries, request_id, 
+                                          max_query_time=600,
+                                          worker_timeout=1800):
     """
     Process all country/month combinations with a thread pool.
     
@@ -279,6 +298,8 @@ def process_all_country_month_combinations(bq_ops, months, countries, request_id
         months: List of months to process
         countries: List of countries to process
         request_id: Unique request identifier
+        max_query_time: Maximum time in seconds to wait for main queries
+        worker_timeout: Maximum time in seconds to wait for a worker
     
     Returns:
         Success counts, failure counts, total rows processed, failed combinations
@@ -299,7 +320,8 @@ def process_all_country_month_combinations(bq_ops, months, countries, request_id
     failed_pairs = set()
     
     # Fixed thread pool size from config
-    max_workers = bq_ops.config.get("MAX_WORKERS", 8)
+    max_workers = min(bq_ops.config.get("MAX_WORKERS", 8), len(combinations))
+    logger.info(f"Using thread pool with {max_workers} workers for {len(combinations)} tasks")
     
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -311,21 +333,35 @@ def process_all_country_month_combinations(bq_ops, months, countries, request_id
                     break
                 
                 combo_id = f"{request_id}_{month.strftime('%Y%m')}_{country}"
-                future = executor.submit(process_month_for_country, bq_ops, month, country, combo_id)
+                # Pass max_query_time to the worker function
+                future = executor.submit(process_month_for_country, 
+                                         bq_ops, month, country, combo_id, max_query_time)
                 future_to_combo[future] = (month, country)
             
-            # Process results as they complete
+            # Process results as they complete, with timeout
             for future in as_completed(future_to_combo):
                 month, country = future_to_combo[future]
                 
                 try:
-                    success, rows = future.result()
+                    # Add timeout to future.result() to prevent hanging
+                    logger.info(f"Waiting for result of {month}/{country} (timeout: {worker_timeout}s)")
+                    success, rows = future.result(timeout=worker_timeout)
+                    
                     if success:
                         successful += 1
                         total_rows += rows
+                        logger.info(f"Completed {month}/{country}: {rows} rows")
                     else:
                         failed += 1
                         failed_pairs.add((month, country))
+                        logger.warning(f"Failed processing {month}/{country}")
+                        
+                except FutureTimeoutError:
+                    # Handle worker timeout
+                    failed += 1
+                    failed_pairs.add((month, country))
+                    logger.error(f"Processing {month}/{country} timed out after {worker_timeout}s")
+                    
                 except Exception as e:
                     failed += 1
                     failed_pairs.add((month, country))
@@ -334,14 +370,18 @@ def process_all_country_month_combinations(bq_ops, months, countries, request_id
                 # Check for shutdown
                 if is_shutdown_requested():
                     logger.warning("Shutdown requested, waiting for in-progress tasks")
-                    executor.shutdown(wait=True, cancel_futures=True)
+                    # Add timeout to shutdown to prevent hanging
+                    try:
+                        executor.shutdown(wait=True, cancel_futures=True)
+                    except Exception as e:
+                        logger.error(f"Error during executor shutdown: {e}")
                     break
         
         return successful, failed, total_rows, failed_pairs
     finally:
         metrics.stop_timer("process_all_combinations")
 
-def process_month(bq_ops, the_month, request_id):
+def process_month(bq_ops, the_month, request_id, max_query_time=600):
     """
     Process data for a specific month for all countries.
     
@@ -349,6 +389,7 @@ def process_month(bq_ops, the_month, request_id):
         bq_ops: BigQuery operations instance
         the_month: Month to process
         request_id: Unique request identifier
+        max_query_time: Maximum time in seconds to wait for main queries
     
     Returns:
         Success status and total rows processed
@@ -370,13 +411,18 @@ def process_month(bq_ops, the_month, request_id):
                 break
                 
             country_request_id = f"{request_id}_{country}"
-            success, rows = process_month_for_country(bq_ops, the_month, country, country_request_id)
+            logger.info(f"Starting sequential processing for {the_month}/{country}")
+            success, rows = process_month_for_country(
+                bq_ops, the_month, country, country_request_id, max_query_time
+            )
             
             if success:
                 successful_countries += 1
                 total_rows += rows
+                logger.info(f"Successfully processed {the_month}/{country}: {rows} rows")
             else:
                 failed_countries += 1
+                logger.error(f"Failed to process {the_month}/{country}")
         
         logger.info(f"Completed processing month {the_month}: {successful_countries} countries successful, {failed_countries} countries failed, {total_rows} total rows")
         
@@ -386,7 +432,8 @@ def process_month(bq_ops, the_month, request_id):
         # Record metrics
         metrics.stop_timer(f"process_month_{the_month.strftime('%Y%m')}")
 
-def process_month_range(bq_ops, start_month, end_month, parallel=True, request_id=None):
+def process_month_range(bq_ops, start_month, end_month, parallel=True, request_id=None, 
+                       max_query_time=600, worker_timeout=1800):
     """
     Process a range of months.
     
@@ -396,6 +443,8 @@ def process_month_range(bq_ops, start_month, end_month, parallel=True, request_i
         end_month: Last month to process
         parallel: Whether to process months in parallel
         request_id: Unique request identifier
+        max_query_time: Maximum time in seconds to wait for main queries
+        worker_timeout: Maximum time in seconds to wait for a worker
     
     Returns:
         Number of successful and failed months
@@ -413,15 +462,39 @@ def process_month_range(bq_ops, start_month, end_month, parallel=True, request_i
     # Get countries to process
     countries = bq_ops.config["ALLOWED_COUNTRIES"]
     
+    # Log parameters and create a timeout monitor
     logger.info(f"Processing {len(months)} months for {len(countries)} countries")
+    logger.info(f"Query timeout: {max_query_time}s, Worker timeout: {worker_timeout}s")
     metrics.start_timer("process_month_range")
     
+    # Create a timeout monitor thread to detect hangs
+    timeout_flag = threading.Event()
+    
+    def timeout_monitor():
+        max_time = 3600  # 1 hour timeout for the whole operation
+        logger.info(f"Timeout monitor started, max time: {max_time}s")
+        timeout_flag.wait(timeout=max_time)
+        if not timeout_flag.is_set():
+            logger.error(f"CRITICAL: process_month_range timed out after {max_time}s")
+            # Request a shutdown
+            from src.shutdown_utils import request_shutdown
+            request_shutdown()
+    
+    timeout_thread = threading.Thread(target=timeout_monitor)
+    timeout_thread.daemon = True
+    timeout_thread.start()
+    
     try:
+        total_rows = 0
+        
         if parallel and (len(months) > 1 or len(countries) > 1):
             # Process all combinations in parallel
-            successful, failed, total_rows, failed_pairs = process_all_country_month_combinations(
-                bq_ops, months, countries, request_id
+            logger.info("Using parallel processing mode")
+            successful, failed, rows_processed, failed_pairs = process_all_country_month_combinations(
+                bq_ops, months, countries, request_id, max_query_time, worker_timeout
             )
+            
+            total_rows = rows_processed
             
             # Map success to month level
             month_success = {}
@@ -434,9 +507,9 @@ def process_month_range(bq_ops, start_month, end_month, parallel=True, request_i
             failed_months = len(months) - successful_months
         else:
             # Process months sequentially
+            logger.info("Using sequential processing mode")
             successful_months = 0
             failed_months = 0
-            total_rows = 0
             
             for month in months:
                 if is_shutdown_requested():
@@ -444,16 +517,24 @@ def process_month_range(bq_ops, start_month, end_month, parallel=True, request_i
                     break
                 
                 month_request_id = f"{request_id}_{month.strftime('%Y%m')}"
-                success, rows = process_month(bq_ops, month, month_request_id)
+                logger.info(f"Starting sequential processing for month {month}")
+                success, rows = process_month(bq_ops, month, month_request_id, max_query_time)
                 total_rows += rows
                 
                 if success:
                     successful_months += 1
+                    logger.info(f"Month {month} processed successfully")
                 else:
                     failed_months += 1
+                    logger.warning(f"Month {month} processing failed")
         
-        logger.info(f"Processed {len(months)} months: {successful_months} successful, {failed_months} failed")
+        logger.info(f"Processed {len(months)} months: {successful_months} successful, {failed_months} failed, {total_rows} total rows")
         return successful_months, failed_months
+    except Exception as e:
+        logger.error(f"Error in process_month_range: {e}")
+        return 0, len(months)
     finally:
+        # Signal the timeout thread to exit
+        timeout_flag.set()
         metrics.stop_timer("process_month_range")
         metrics.record_value("total_rows_processed", total_rows)

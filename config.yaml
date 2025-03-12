@@ -24,7 +24,7 @@ processing:
 # Temporary Tables Configuration
 temp_tables:
   # Hours before temporary tables are considered orphaned and cleaned up
-  cleanup_age_hours: 24
+  cleanup_age_hours: 1
   # Hours before temporary tables expire (BigQuery table expiration)
   expiration_hours: 24
   # Whether to add descriptions to temporary tables
@@ -77,4 +77,4 @@ resilience:
 # Logging Configuration
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR, or CRITICAL
-  level: "DEBUG"
+  level: "INFO"

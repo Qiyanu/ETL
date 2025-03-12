@@ -3,6 +3,60 @@ import yaml
 import logging
 from typing import Dict, Any, Tuple, List, Union
 
+def get_config_path(config_file=None):
+    """
+    Determine the absolute path to the configuration file.
+    
+    Args:
+        config_file (str, optional): Filename or path to the config file
+    
+    Returns:
+        str: Absolute path to the configuration file
+    """
+    # Check if a specific config file is provided via environment variable
+    if config_file is None:
+        config_file = os.environ.get("CONFIG_FILE", "config.yaml")
+    
+    # If an absolute path is provided, return it
+    if os.path.isabs(config_file):
+        return config_file
+    
+    # When main.py is in src folder, project root is one directory up
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    config_path = os.path.join(project_root, config_file)
+    
+    if os.path.exists(config_path):
+        print(f"Found config file at: {config_path}")
+        return config_path
+    
+    # Check relative to current working directory
+    current_dir_path = os.path.join(os.getcwd(), config_file)
+    if os.path.exists(current_dir_path):
+        print(f"Found config file at: {current_dir_path}")
+        return current_dir_path
+    
+    # If no config found, print detailed debugging information
+    print("CONFIG FILE SEARCH PATHS:")
+    print(f"1. Environment CONFIG_FILE: {os.environ.get('CONFIG_FILE')}")
+    print(f"2. Project Root Path: {config_path}")
+    print(f"3. Current Working Directory Path: {current_dir_path}")
+    print(f"4. Current Working Directory: {os.getcwd()}")
+    print(f"5. Absolute path to main.py: {os.path.abspath(__file__)}")
+    print(f"6. Project Root: {project_root}")
+    print(f"7. File Exists in Project Root: {os.path.exists(config_path)}")
+    print(f"8. File Exists in Current Directory: {os.path.exists(current_dir_path)}")
+    
+    # Raise an error with detailed information
+    raise FileNotFoundError(f"""
+    Configuration file not found. 
+    Searched locations:
+    1. {os.environ.get('CONFIG_FILE')}
+    2. {config_path}
+    3. {current_dir_path}
+    
+    Please ensure the config.yaml file is in the correct location.
+    """)
+
 def _sanitize_table_reference(table_id: str) -> str:
     """
     Sanitize a BigQuery table reference to prevent injection attacks.
@@ -68,6 +122,7 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
     for key, expected_type in required_keys.items():
         # Use helper function to access nested keys
         value = _get_nested_config_value(config, key)
+        print(str(key) +" : " + str(value))
         if value is None:
             errors.append(f"Missing required configuration key: {key}")
         elif not isinstance(value, expected_type):
@@ -444,5 +499,5 @@ def load_config(config_file=None) -> Dict[str, Any]:
     
     # Add the nested config
     flat_config["_NESTED_CONFIG"] = config
-    
+    print(flat_config)
     return flat_config

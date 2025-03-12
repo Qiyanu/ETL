@@ -12,18 +12,18 @@ tables:
 
 # Processing Configuration
 processing:
-  # Maximum number of concurrent workers
-  max_workers: 8
-  
-  # Query timeout in seconds
+  # Query timeout in seconds (new explicit key)
   query_timeout: 3600
+  
+  # Maximum number of concurrent workers (new explicit key)
+  max_workers: 8
   
   # BigQuery geographic location
   location: "EU"
 
 # Filtering Configuration
 filters:
-  # Countries to process
+  # Countries to process (new explicit key)
   allowed_countries:
     - "ITA"
     - "ESP"

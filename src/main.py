@@ -5,8 +5,9 @@ import uuid
 import json
 from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
+import traceback
 
-from src.config import load_config
+from src.config import load_config, get_config_path
 from src.logging_utils import logger
 from src.metrics import metrics
 from src.bigquery_utils import BigQueryOperations
@@ -35,8 +36,10 @@ def main():
     try:
         # Load configuration
         try:
-            config_file = os.environ.get("CONFIG_FILE", "config.yaml")
+            config_file = get_config_path()
+            print(f"Loading configuration from: {config_file}")
             config = load_config(config_file)
+            print("CONFIG LOADED SUCCESSFULLY")
         except Exception as e:
             logger.error(f"Failed to load configuration: {e}")
             sys.exit(1)
@@ -66,9 +69,9 @@ def main():
                 # Use explicitly configured start and end months
                 start_month = datetime.strptime(config["START_MONTH"], '%Y-%m-%d').date()
                 end_month = datetime.strptime(config["END_MONTH"], '%Y-%m-%d').date()
-            elif config.get("LAST_N_MONTHS"):
+            elif config.get("JOB_LAST_N_MONTHS"):
                 # Process the last N months
-                last_n_months = int(config["LAST_N_MONTHS"])
+                last_n_months = int(config["JOB_LAST_N_MONTHS"])
                 end_month = date.today().replace(day=1) - relativedelta(days=1)
                 end_month = end_month.replace(day=1)  # First day of last month
                 start_month = end_month - relativedelta(months=last_n_months-1)
@@ -86,8 +89,8 @@ def main():
                 raise ValueError(f"Date range too large: {start_month} to {end_month} spans more than 36 months")
             
             # Log parameters
-            logger.info(f"Processing from {start_month} to {end_month}, parallel={config.get('PARALLEL', True)}")
-            logger.info(f"Countries to process: {', '.join(config.get('ALLOWED_COUNTRIES', []))}")
+            logger.info(f"Processing from {start_month} to {end_month}, parallel={config.get('JOB_PARALLEL', True)}")
+            logger.info(f"Countries to process: {', '.join(config.get('"FILTERS_ALLOWED_COUNTRIES', []))}")
             
             # Ensure destination table exists with optimal schema
             create_customer_data_table_if_not_exists(bq_ops)
@@ -97,7 +100,7 @@ def main():
                 bq_ops, 
                 start_month, 
                 end_month, 
-                config.get("PARALLEL", True), 
+                config.get("JOB_PARALLEL", True), 
                 request_id
             )
             
@@ -111,7 +114,7 @@ def main():
                 "job_id": job_id,
                 "start_month": start_month.isoformat(),
                 "end_month": end_month.isoformat(),
-                "countries": config.get("ALLOWED_COUNTRIES", []),
+                "countries": config.get("FILTERS_ALLOWED_COUNTRIES", []),
                 "successful_months": successful_months,
                 "failed_months": failed_months,
                 "processing_time_seconds": round(elapsed, 2),

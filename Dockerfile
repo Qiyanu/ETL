@@ -24,7 +24,9 @@ COPY config.yaml .
 COPY src/ ./src/
 
 # Set Python path
-ENV PYTHONPATH=/app
-
+ENV PYTHONPATH=/app \
+    CONFIG_FILE=/app/config.yaml \
+    K_SERVICE=customer-data-etl \
+    LOG_LEVEL=INFO 
 # Command to run
 CMD ["python", "-m", "src.main"]
